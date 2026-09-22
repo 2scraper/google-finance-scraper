@@ -318,7 +318,21 @@ jobs:
           want("only %d financial periods" % len(fin), len(fin) >= 60,
                "measured 90 quarters back to 2004")
           want("only %d analyst rows" % len(ana), len(ana) >= 10)
-          want("only %d chart bars" % len(cha), len(cha) >= 60)
+          # The chart floor is the DAILY series alone, and the intraday
+          # series is asserted only when the session has actually produced
+          # one. Measured 2026-09-22: 99 bars when the previous session was
+          # complete (79 intraday + 20 daily), and 25 at 09:53 New York —
+          # twenty-three minutes after the opening bell — because the
+          # intraday series had five bars in it.
+          #
+          # This job runs at 10:41 New York, so a fixed floor of 60 would
+          # have been red every single morning, and red on every US market
+          # holiday besides. A check that is always red teaches everyone to
+          # ignore checks.
+          daily = [r for r in cha if r.get("interval") == "1d"]
+          intraday = [r for r in cha if r.get("interval") == "5m"]
+          want("only %d daily bars" % len(daily), len(daily) >= 15,
+               "about a month of them is published regardless of the hour")
 
           # THE assertion this job exists for. The financial figures live in
           # a 106-slot array with NO labels anywhere in the payload, so a
@@ -360,12 +374,20 @@ jobs:
                and a0.get("target_high") is not None
                and a0.get("target_low") <= a0.get("target_high"))
 
-          # Both chart intervals, and the OHLC invariant on every bar.
-          intervals = {r.get("interval") for r in cha}
-          want("chart is missing an interval (%s)" % sorted(
-                   i for i in intervals if i),
-               intervals == {"5m", "1d"},
-               "both are published in the first response")
+          # The intraday series, asserted only when the session has one —
+          # it is empty before the opening bell and on a market holiday, and
+          # neither is a defect.
+          if intraday:
+              want("intraday bars span more than one day (%s)"
+                   % sorted({r["ts"][:10] for r in intraday}),
+                   len({r["ts"][:10] for r in intraday}) == 1,
+                   "the five-minute series is one session")
+          else:
+              print("::notice::No intraday bars — the session has not opened "
+                    "or it is a market holiday. The daily series was checked.")
+          want("chart carries no recognised interval",
+               {r.get("interval") for r in cha} <= {"5m", "1d"}
+               and "1d" in {r.get("interval") for r in cha})
           bad = [r for r in cha
                  if not (r["low"] <= r["open"] <= r["high"]
                          and r["low"] <= r["close"] <= r["high"])]
@@ -387,6 +409,8 @@ jobs:
                 "%d earnings events, %.0f%% priced, complete"
                 % (len(rows), len(strips), len(quotes), len(fin), len(ana),
                    len(cha), len(earn), share))
+          print("           chart: %d daily + %d intraday bars"
+                % (len(daily), len(intraday)))
           PY
 
       - name: Upload the run's artefacts
