@@ -60,7 +60,8 @@ from product_parser import (parse_products, parse_product_page,
                             quote_url, markets_url, with_market,
                             canonical_url, symbol_from_url,
                             no_pagination_reason, MARKET_STRIPS, MOVER_LISTS,
-                            market_from_url)
+                            market_from_url, QUOTE_PAGE_MODES,
+                            MARKET_PAGE_MODES, ALL_MODES)
 from output_writer import (dedupe_by_key, finish_run, EXIT_API_ERROR,
                            DEDUPE_KEY_BY_MODE,
                            SOURCE_DEFAULT)
@@ -385,7 +386,7 @@ def _parse_for_mode(html: str, url: str, args, page_num: int = 1) -> List:
     market = args.market or market_from_url(url)
     rows = parse_products(html, url, page=page_num, mode=args.mode,
                           market=market)
-    if args.category and args.mode != "quote":
+    if args.category and args.mode in MARKET_PAGE_MODES:
         rows = [r for r in rows if r.listing == args.category]
     return rows
 
@@ -922,7 +923,7 @@ def scrape(args) -> int:
             stop_reason = ("page_load_timeout" if first.load_failed
                            else f"blocked_{first.blocked_by}")
             blocked = first.blocked_by is not None
-        elif args.mode == "quote":
+        elif args.mode in QUOTE_PAGE_MODES:
             seen_keys.update(p.sku for p in first.products if p.sku is not None)
 
             planned = list(getattr(args, "_symbol_urls", []) or [])[1:] or None
@@ -1146,30 +1147,46 @@ def parse_args():
                         "whose lists are geo-selected; two markets are two "
                         "SAMPLES, not a change in the data, and diff_runs.py "
                         "refuses to compare across it.")
-    p.add_argument("--mode", choices=["quote", "markets", "movers"],
+    p.add_argument("--mode",
+                   choices=["quote", "markets", "movers", "financials",
+                            "analysts", "earnings", "chart"],
                    default="quote",
-                   help="quote (default): one instrument per --symbols "
-                        "entry, with the session's open/high/low, volume, "
-                        "market cap and industry that only a quote page "
-                        "carries. markets: every strip the Google Finance "
-                        "root publishes — 46 rows on the 2026-09-22 gl=US "
-                        "capture, being 19 broad indices, 12 sector indices, "
-                        "5 currency pairs, 5 crypto pairs and 5 futures. "
-                        "movers: that page's gainers, losers and most-active "
-                        "previews, 7 to 11 rows. Note PREVIEWS: Google "
-                        "retired the standalone /finance/markets/gainers "
-                        "pages and the root publishes only the top few of "
-                        "each, so a full ranking is not available from this "
-                        "site at any price.")
+                   help="INSTRUMENT MODES, one --symbols entry each. "
+                        "quote (default): the current quote with the "
+                        "session's open/high/low, volume, market cap and "
+                        "industry. financials: one row per reporting "
+                        "period, quarterly back to 2004 on a large cap — "
+                        "revenue, net income, operating expense, EBITDA, "
+                        "EPS, net margin, effective tax rate, and what the "
+                        "street had estimated. analysts: the consensus "
+                        "verdict, the buy/hold/sell split, the 12-month "
+                        "target range, and every published analyst action "
+                        "with its firm, date and price target. chart: every "
+                        "OHLCV bar the page already carries — the latest "
+                        "session at five-minute resolution AND about a "
+                        "month of daily bars, in one run with no extra "
+                        "fetch. "
+                        "MARKET MODES, one page each. markets: every strip "
+                        "the market page publishes — 46 rows on the "
+                        "2026-09-22 gl=US capture, being 20 broad indices, "
+                        "11 sector indices, 5 currency pairs, 5 crypto "
+                        "pairs and 5 futures. movers: that page's gainers, "
+                        "losers and most-active, which are PREVIEWS — "
+                        "Google retired the standalone "
+                        "/finance/markets/gainers pages and publishes only "
+                        "the top few of each, so a full ranking is not "
+                        "available from this site at any price. earnings: "
+                        "its upcoming announcements calendar, with revenue "
+                        "and EPS estimates.")
     p.add_argument("--category", default=None, metavar="STRIP",
-                   help="Keep only rows from one of the root page's strips "
-                        "in --mode markets — index, sector, currency, crypto "
-                        "or futures — or one of gainers, losers, "
-                        "most_active in --mode movers. These are the "
-                        "listings the retired /finance/markets/* URLs used "
-                        "to serve, so this is how to ask for just one of "
-                        "them. Ignored in --mode quote, which reads one "
-                        "named instrument.")
+                   help="Keep only rows from one of the market page's "
+                        "strips in --mode markets — index, sector, "
+                        "currency, crypto or futures — or one of gainers, "
+                        "losers, most_active in --mode movers. These are "
+                        "the listings the retired /finance/markets/* URLs "
+                        "used to serve, so this is how to ask for just one "
+                        "of them. Ignored in the instrument modes, which "
+                        "read one named instrument.")
     p.add_argument("--pages", type=int, default=1,
                    help="Accepted for family compatibility and refused above "
                         "1, with the reason. Google Finance does not "
@@ -1309,9 +1326,10 @@ def parse_args():
 
     if args.category:
         allowed = MARKET_STRIPS if args.mode == "markets" else MOVER_LISTS
-        if args.mode == "quote":
-            logger.warning("--category is ignored in --mode quote, which "
-                           "reads one named instrument rather than a list.")
+        if args.mode in QUOTE_PAGE_MODES:
+            logger.warning("--category is ignored in --mode %s, which "
+                           "reads one named instrument rather than a list.",
+                           args.mode)
             args.category = None
         elif args.category not in allowed:
             p.error("--category %r is not a strip of --mode %s. Pick one of: "
@@ -1328,11 +1346,12 @@ def parse_args():
     language = (args.locale or "en").split("-")[0] or None
     symbols = [s.strip() for s in (args.symbols or "").split(",") if s.strip()]
 
-    if args.mode == "quote":
+    if args.mode in QUOTE_PAGE_MODES:
         if symbols and args.url:
-            p.error("pass --symbols or --url, not both: --mode quote reads "
-                    "the instruments you name, and two sources for that list "
-                    "is a silent way to read the wrong one.")
+            p.error("pass --symbols or --url, not both: --mode %s reads "
+                    "the instruments you name, and two sources for that "
+                    "list is a silent way to read the wrong one."
+                    % (args.mode,))
         if symbols:
             seen = []
             for s in symbols:
@@ -1348,26 +1367,28 @@ def parse_args():
             args.url = with_market(canonical_url(args.url), args.market,
                                    language)
             if not symbol_from_url(args.url):
-                p.error("--mode quote needs an instrument URL "
+                p.error("--mode %s needs an instrument URL "
                         "(www.google.com/finance/quote/GOOGL:NASDAQ); %r "
-                        "addresses no instrument. Use --mode markets for the "
-                        "root page, or pass --symbols." % (args.url,))
+                        "addresses no instrument. Use --mode markets, "
+                        "movers or earnings for the market page, or pass "
+                        "--symbols." % (args.mode, args.url))
             args._symbol_urls = [args.url]
         else:
-            p.error("--mode quote needs --symbols (GOOGL:NASDAQ,BMW:ETR) or "
-                    "an instrument --url, and GOOGLE_FINANCE_URL is not set "
-                    "in the environment or in .env.")
+            p.error("--mode %s needs --symbols (GOOGL:NASDAQ,BMW:ETR) or "
+                    "an instrument --url, and GOOGLE_FINANCE_URL is not "
+                    "set in the environment or in .env." % (args.mode,))
     else:
         if symbols:
             p.error("--symbols names instruments and --mode %s reads the "
-                    "root page's lists; the two do not combine. Use --mode "
-                    "quote for named instruments." % (args.mode,))
+                    "market page; the two do not combine. Use --mode "
+                    "quote, financials, analysts or chart for named "
+                    "instruments." % (args.mode,))
         args.url = (with_market(canonical_url(args.url), args.market, language)
                     if args.url else markets_url(args.market, language))
         if symbol_from_url(args.url):
-            p.error("%r is one instrument and --mode %s reads the root "
-                    "page's lists. Use --mode quote for it."
-                    % (args.url, args.mode))
+            p.error("%r is one instrument and --mode %s reads the market "
+                    "page. Use --mode quote, financials, analysts or chart "
+                    "for it." % (args.url, args.mode))
         args._symbol_urls = [args.url]
 
     if not is_supported_host(args.url):

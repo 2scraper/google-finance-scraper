@@ -81,6 +81,10 @@ SOURCES: Dict[str, Tuple[str, str, str]] = {
                      "https://www.google.com/finance/beta/quote/BTC-USD"),
     "quote_futures": ("quote_futures.html", "quote",
                       "https://www.google.com/finance/beta/quote/GCW00:COMEX"),
+    "quote_stock_jp": ("quote_stock_jp.html", "quote",
+                       "https://www.google.com/finance/beta/quote/7203:TYO"),
+    "quote_stock_gb": ("quote_stock_gb.html", "quote",
+                       "https://www.google.com/finance/beta/quote/SHEL:LON"),
     "markets_us": ("markets_us.html", "markets",
                    "https://www.google.com/finance/beta/?hl=en&gl=US"),
     "markets_de": ("markets_de.html", "markets",
@@ -89,6 +93,25 @@ SOURCES: Dict[str, Tuple[str, str, str]] = {
                   "https://www.google.com/finance/beta/?hl=en&gl=US"),
     "movers_de": ("markets_de.html", "movers",
                   "https://www.google.com/finance/beta/?hl=de&gl=DE"),
+    # Mode C. Three instruments in three currencies for financials, because
+    # the slot map behind it was established by agreement ACROSS
+    # instruments and a one-instrument fixture would not exercise that.
+    "financials_us": ("quote_stock_us.html", "financials",
+                      "https://www.google.com/finance/beta/quote/GOOGL:NASDAQ"),
+    "financials_de": ("quote_stock_de.html", "financials",
+                      "https://www.google.com/finance/beta/quote/BMW:ETR"),
+    "financials_jp": ("quote_stock_jp.html", "financials",
+                      "https://www.google.com/finance/beta/quote/7203:TYO"),
+    "analysts_us": ("quote_stock_us.html", "analysts",
+                    "https://www.google.com/finance/beta/quote/GOOGL:NASDAQ"),
+    "analysts_de": ("quote_stock_de.html", "analysts",
+                    "https://www.google.com/finance/beta/quote/BMW:ETR"),
+    "chart_us": ("quote_stock_us.html", "chart",
+                 "https://www.google.com/finance/beta/quote/GOOGL:NASDAQ"),
+    "chart_de": ("quote_stock_de.html", "chart",
+                 "https://www.google.com/finance/beta/quote/BMW:ETR"),
+    "earnings_us": ("markets_us.html", "earnings",
+                    "https://www.google.com/finance/beta/?hl=en&gl=US"),
 }
 
 # Fixtures that exist to exercise a STATE rather than a row. They keep the
@@ -128,6 +151,23 @@ def _document(parts: List[str]) -> str:
             '</head><body>' + "".join(parts) + '</body></html>')
 
 
+def _row_key(row, mode: str) -> tuple:
+    """What makes a row distinct, for the greedy blob search.
+
+    Uses the same per-mode key `output_writer` dedupes on, so the trim
+    cannot keep a blob that adds only rows the run would have deduped away
+    — and, more importantly, cannot DROP a blob whose rows differ in a field
+    the search was not looking at. The first version keyed everything on
+    (sku, listing), which is null on every mode-C row, so one blob per
+    instrument looked like the whole series.
+    """
+    from output_writer import DEDUPE_KEY_BY_MODE
+    fields = DEDUPE_KEY_BY_MODE.get(mode, ("sku",))
+    if isinstance(fields, str):
+        fields = (fields,)
+    return tuple(getattr(row, f, None) for f in fields)
+
+
 def _rows_signature(rows) -> List[dict]:
     """Every column of every row, minus the two that move between parses."""
     import dataclasses
@@ -144,21 +184,63 @@ def _minimal_blobs(html: str, url: str, mode: str) -> Tuple[List[str], List[str]
 
     Greedy, smallest first — see the module docstring for why the order
     matters by a factor of fifteen.
+
+    SEEDED, for the instrument modes, and that is not an optimisation. A
+    financials, analysts or chart parse first has to identify WHICH
+    instrument the page is about, which it does from the rich quote record
+    in a different blob. Testing each blob alone therefore yielded zero rows
+    for every one of them — the blob holding the financial periods has no
+    quote record in it, and the blob holding the quote record has no
+    periods — so the greedy search kept nothing and the verification
+    correctly refused to write a fixture that parsed to 0 rows against a
+    capture that parses to 90.
+
+    So the search starts from whatever blobs a `quote` parse needs, then
+    adds. The seed is found the same greedy way, which keeps the whole thing
+    honest: nothing here is hand-picked.
     """
     blobs = _AF_BLOB.findall(html)
     scored = sorted(blobs, key=len)
+
     kept: List[str] = []
-    seen_rows: set = set()
+    if mode in pp.QUOTE_PAGE_MODES and mode != "quote":
+        seed, _ = _minimal_blobs(html, url, "quote")
+        kept = list(seed)
+
+    seen_rows = {_row_key(r, mode)
+                 for r in pp.parse_products(_document(kept), url, mode=mode, page=1)}
     for blob in scored:
-        rows = pp.parse_products(_document([blob]), url, mode=mode)
-        keys = {(r.sku, r.listing) for r in rows}
+        if blob in kept:
+            continue
+        rows = pp.parse_products(_document(kept + [blob]), url, mode=mode,
+                                  page=1)
+        keys = {_row_key(r, mode) for r in rows}
         if keys - seen_rows:
             kept.append(blob)
             seen_rows |= keys
+    # A fixture must reproduce the capture's parse, not merely its row
+    # COUNT, so the greedy pass is followed by a convergence pass: keep
+    # adding blobs, smallest first, until the trimmed parse matches the full
+    # one column for column.
+    #
+    # This is not belt-and-braces. The 2026-09-22 Shell capture holds two
+    # quote records for SHEL:LON taken 13 seconds apart; the parser takes
+    # the fresher, and a trim that kept only the blob holding the older one
+    # produced one row with a different price. Row counts matched, values
+    # did not, and a suite built on that fixture would have pinned the wrong
+    # price forever.
+    want = _rows_signature(pp.parse_products(html, url, mode=mode, page=1))
+    for blob in scored:
+        if _rows_signature(pp.parse_products(_document(kept), url,
+                                             mode=mode, page=1)) == want:
+            break
+        if blob not in kept:
+            kept.append(blob)
+
     # Restore the capture's own order: the parser must not depend on it, and
     # a fixture that silently reordered the payload would hide it if it did.
-    order = {id(b): i for i, b in enumerate(blobs)}
-    kept.sort(key=lambda b: order[id(b)])
+    order = {b: i for i, b in enumerate(blobs)}
+    kept.sort(key=lambda b: order.get(b, 0))
     return kept, blobs
 
 
@@ -186,10 +268,10 @@ def build() -> int:
             print(f"  {name}: SKIP, no {filename}")
             continue
         html = open(path, encoding="utf-8", errors="replace").read()
-        expected = _rows_signature(pp.parse_products(html, url, mode=mode))
+        expected = _rows_signature(pp.parse_products(html, url, mode=mode, page=1))
         kept, all_blobs = _minimal_blobs(html, url, mode)
         doc = _document(kept)
-        got = _rows_signature(pp.parse_products(doc, url, mode=mode))
+        got = _rows_signature(pp.parse_products(doc, url, mode=mode, page=1))
         if got != expected:
             print(f"  {name}: FAIL — trimmed fixture parses differently "
                   f"({len(got)} rows vs {len(expected)})")
@@ -198,7 +280,7 @@ def build() -> int:
         doc, hits = _scrub(doc)
         if hits:
             print(f"  {name}: scrubbed {len(hits)} pattern(s): {hits}")
-            if _rows_signature(pp.parse_products(doc, url, mode=mode)) != expected:
+            if _rows_signature(pp.parse_products(doc, url, mode=mode, page=1)) != expected:
                 print(f"  {name}: FAIL — scrubbing changed the parse")
                 failures += 1
                 continue

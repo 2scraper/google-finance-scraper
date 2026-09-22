@@ -103,6 +103,42 @@ jobs:
             --out canary_quotes --dump-html canary_quotes.html
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
+      - name: Scrape the upcoming earnings calendar
+        id: earnings
+        # The market page's calendar, which is geo-selected like every other
+        # list on it. Kept as its own step rather than folded into the
+        # markets one so a calendar that empties out is distinguishable from
+        # a market page that stopped parsing.
+        continue-on-error: true
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --mode earnings --market US --retries 4 \
+            --out canary_earnings --dump-html canary_earnings.html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Scrape one instrument's financials, analysts and chart
+        id: deep
+        # The four instrument modes read the SAME first response the quote
+        # mode fetches, so this is three page loads rather than three
+        # scrapes of three different things — and it is the only daily test
+        # that the payload's unlabelled financial slots still hold what
+        # they held when they were mapped. If Google reorders that array,
+        # nothing raises and nothing looks wrong; the assertions below are
+        # what would notice.
+        continue-on-error: true
+        run: |
+          set +e
+          code=0
+          for mode in financials analysts chart; do
+            python3 playwright_scraper.py \
+              --mode "$mode" --symbols GOOGL:NASDAQ --delay 2 --retries 4 \
+              --out "canary_$mode" --dump-html "canary_$mode.html"
+            rc=$?
+            [ "$rc" -eq 0 ] || code="$rc"
+          done
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
       - name: Interpret the exit codes
         id: verdict
         # ACCESS CONDITIONS ARE NOT DEFECTS — failing the job on any non-zero
@@ -120,7 +156,9 @@ jobs:
           set -e
           tested=true
           for pair in "markets:${{ steps.markets.outputs.exit_code }}" \
-                      "quotes:${{ steps.quotes.outputs.exit_code }}"; do
+                      "quotes:${{ steps.quotes.outputs.exit_code }}" \
+                      "earnings:${{ steps.earnings.outputs.exit_code }}" \
+                      "deep:${{ steps.deep.outputs.exit_code }}"; do
             name="${pair%%:*}"; code="${pair##*:}"
             case "$code" in
               0)
@@ -252,14 +290,103 @@ jobs:
                    equity.get(col) is not None,
                    "a quote page publishes it; a list row does not")
 
+
+          # ---- the earnings calendar --------------------------------------
+          earn = json.load(open("canary_earnings.json"))
+          # 5 events on the 2026-09-22 capture. Floored at 1 rather than 5:
+          # a calendar legitimately empties out over a holiday, and a check
+          # that goes red every Christmas is one people learn to ignore.
+          want("the earnings calendar came back empty", len(earn) >= 1,
+               "5 events when measured; a quiet week is legitimate")
+          want("an event names no instrument",
+               all(e.get("sku") for e in earn))
+          want("an event has no date", all(e.get("event_date") for e in earn))
+          want("no event carries an estimate",
+               any(e.get("revenue_estimate") or e.get("eps_estimate")
+                   for e in earn),
+               "the two slots a not-yet-reported period carries")
+
+          # ---- the instrument modes ---------------------------------------
+          fin = json.load(open("canary_financials.json"))
+          ana = json.load(open("canary_analysts.json"))
+          cha = json.load(open("canary_chart.json"))
+
+          # Measured 90 / 44 / 99 on 2026-09-22. Floored, because Google
+          # legitimately adds a quarter, drops an analyst note or serves a
+          # short session — but not so far that a half-parsed payload
+          # passes.
+          want("only %d financial periods" % len(fin), len(fin) >= 60,
+               "measured 90 quarters back to 2004")
+          want("only %d analyst rows" % len(ana), len(ana) >= 10)
+          want("only %d chart bars" % len(cha), len(cha) >= 60)
+
+          # THE assertion this job exists for. The financial figures live in
+          # a 106-slot array with NO labels anywhere in the payload, so a
+          # reordering upstream would silently move every column. These are
+          # relationships rather than fixed numbers, so they survive a new
+          # quarter but not a reshuffle.
+          recent = [r for r in fin if r.get("detailed")]
+          want("no detailed periods came back", recent)
+          if recent:
+              q = recent[0]
+              for col in ("revenue", "net_income", "eps", "ebitda",
+                          "net_profit_margin", "effective_tax_rate",
+                          "operating_expense", "currency", "period_end"):
+                  want("the newest quarter has no %s" % col,
+                       q.get(col) is not None)
+              want("revenue is not a revenue-sized number (%s)" % q.get("revenue"),
+                   q.get("revenue", 0) > 1e9,
+                   "a quarterly revenue in the slot map's units")
+              want("net margin is not a percentage (%s)"
+                   % q.get("net_profit_margin"),
+                   0 < q.get("net_profit_margin", -1) <= 100)
+              want("effective tax rate is not a percentage (%s)"
+                   % q.get("effective_tax_rate"),
+                   0 <= q.get("effective_tax_rate", -1) <= 100)
+              want("EPS is not per-share sized (%s)" % q.get("eps"),
+                   0 < abs(q.get("eps", 0)) < 1000)
+              want("EBITDA is not below EPS (the two slots have swapped)",
+                   q.get("ebitda", 0) > abs(q.get("eps", 0)))
+
+          # The analyst split, whose slot order is the counter-intuitive one.
+          a0 = ana[0]
+          want("no consensus verdict", a0.get("consensus"))
+          counts = [a0.get(k) for k in ("buy_count", "hold_count", "sell_count")]
+          if all(c is not None for c in counts):
+              want("the buy/hold/sell split does not sum to the total",
+                   sum(counts) == a0.get("analysts_total"))
+          want("no 12-month target range",
+               a0.get("target_low") is not None
+               and a0.get("target_high") is not None
+               and a0.get("target_low") <= a0.get("target_high"))
+
+          # Both chart intervals, and the OHLC invariant on every bar.
+          intervals = {r.get("interval") for r in cha}
+          want("chart is missing an interval (%s)" % sorted(
+                   i for i in intervals if i),
+               intervals == {"5m", "1d"},
+               "both are published in the first response")
+          bad = [r for r in cha
+                 if not (r["low"] <= r["open"] <= r["high"]
+                         and r["low"] <= r["close"] <= r["high"])]
+          want("%d bars violate low <= open,close <= high" % len(bad), not bad,
+               "close is SECOND in the payload; a swap shows up here")
+          pairs = [(r.get("interval"), r.get("ts")) for r in cha]
+          want("a bar is duplicated across intervals",
+               len(set(pairs)) == len(pairs),
+               "the current session's daily bar shares its timestamp with "
+               "that session's last intraday bar")
+
           if problems:
               print("CANARY FAILED:")
               for p in problems:
                   print("  -", p)
               raise SystemExit(1)
           print("canary OK: %d market rows across %d strips, %d quotes, "
-                "%.0f%% priced, complete"
-                % (len(rows), len(strips), len(quotes), share))
+                "%d financial periods, %d analyst rows, %d chart bars, "
+                "%d earnings events, %.0f%% priced, complete"
+                % (len(rows), len(strips), len(quotes), len(fin), len(ana),
+                   len(cha), len(earn), share))
           PY
 
       - name: Upload the run's artefacts
@@ -274,6 +401,11 @@ jobs:
             canary_quotes.json
             canary_quotes.csv
             canary_quotes.meta.json
+            canary_financials.json
+            canary_analysts.json
+            canary_chart.json
+            canary_earnings.json
+            canary_*.meta.json
             canary_*.html*
           if-no-files-found: warn
           retention-days: 14

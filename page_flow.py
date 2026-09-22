@@ -150,16 +150,17 @@ CONTENT_TIMEOUT_MS = 20_000
 # only for the engines' progress arithmetic and never to infer a total.
 PAGE_SIZE = 46
 
-_READY = {
-    "quote": READY_SELECTOR_QUOTE,
-    "markets": READY_SELECTOR_MARKETS,
-    "movers": READY_SELECTOR_MARKETS,
-}
-_MIN = {
-    "quote": MIN_CARD_MATCHES_QUOTE,
-    "markets": MIN_CARD_MATCHES,
-    "movers": MIN_CARD_MATCHES,
-}
+# The instrument modes all read a quote page and the list modes all read the
+# market page, so readiness is a property of the PAGE KIND rather than of
+# the mode. Spelled out per mode anyway: a map is cheaper to read than a
+# rule, and an engine cannot disagree with its twins about a lookup.
+_QUOTE_PAGE_MODES = ("quote", "financials", "analysts", "chart")
+_MARKET_PAGE_MODES = ("markets", "movers", "earnings")
+
+_READY = {m: READY_SELECTOR_QUOTE for m in _QUOTE_PAGE_MODES}
+_READY.update({m: READY_SELECTOR_MARKETS for m in _MARKET_PAGE_MODES})
+_MIN = {m: MIN_CARD_MATCHES_QUOTE for m in _QUOTE_PAGE_MODES}
+_MIN.update({m: MIN_CARD_MATCHES for m in _MARKET_PAGE_MODES})
 
 
 def ready_selector(mode: str = "quote") -> str:

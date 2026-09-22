@@ -10,6 +10,78 @@ release notes lead with it.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-22
+
+Four more modes, all reading the SAME first response the quote modes already
+fetch. The site's Overview / Analysis / Earnings / Financials tabs are
+rendered client-side from data that has already arrived, so
+`--mode financials` costs one page fetch — the same one `--mode quote`
+makes.
+
+### Added
+
+- **`--mode financials`** — one row per reporting period. 90 quarters back
+  to 2004 on a large cap, with revenue, net income, operating expense,
+  EBITDA, EPS, net profit margin, effective tax rate, and what the street
+  had estimated for revenue and EPS.
+- **`--mode analysts`** — the consensus verdict, the buy/hold/sell split,
+  the 12-month target low/mean/high with Google's own upside figure, and
+  every published analyst action with its firm, date, rating, price target
+  and headline. 44 actions on `GOOGL:NASDAQ`.
+- **`--mode chart`** — every OHLCV bar the page already carries: one full
+  session at five-minute resolution AND about a month of daily bars, in one
+  run. 99 bars on `GOOGL:NASDAQ`.
+- **`--mode earnings`** — the market page's upcoming announcements, with
+  revenue and EPS estimates. Geo-selected by `--market` like every other
+  list on that page.
+- Four row classes — `Financial`, `AnalystRating`, `EarningsEvent`,
+  `ChartPoint` — each keeping the family's five-column prefix, so `sku`
+  joins every mode to every other.
+
+### Fixed
+
+Three of these were found by running all three engines against the same URL
+and diffing, which is the only reason any of them was visible:
+
+- **The current session's daily bar was labelled a five-minute bar.** It
+  carries the same timestamp as that session's LAST intraday bar, so
+  grouping bars by date put a whole-day bar — with the session's open, high,
+  low and volume — into the intraday series. The two series then ordered
+  differently under different walk orders, and one engine put a different
+  row at position 97. Intervals are now labelled per SERIES, by the median
+  gap between bars.
+- **A page carrying two quotes for one instrument picked whichever was
+  walked first.** The Shell capture holds two records taken 13 seconds
+  apart; the freshest is now chosen, so two parses of one page agree.
+- **`--mode markets` row order depended on which blobs a document held.**
+  The indices strip is published twice, so the same 46 rows came out
+  sectors-first or indices-first and every row's `position` changed. Rows
+  are now sorted by (strip, symbol), which is OUR order and is documented as
+  such.
+
+### Notes
+
+- **`--window` does not deepen the chart** — every value from `5D` to `MAX`
+  returns the same daily series, because the deeper history is fetched by an
+  endpoint this repo does not implement.
+- **`financials` exposes 7 of 106 slots.** The payload labels none of them.
+  Each of the seven was established by matching the page's own rendered
+  figure against every slot across four periods on four instruments in four
+  currencies — and the method paid for itself immediately: EPS matched two
+  slots on Alphabet and only one on BMW, so a one-instrument mapping had an
+  even chance of reading the wrong column. The other 99 slots are left
+  alone.
+- **EPS is null where Google publishes none** — 0 of 88 periods on
+  `7203:TYO` against 90 of 90 on `GOOGL:NASDAQ` — and is deliberately NOT
+  filled from the adjacent basic-EPS slot, which is a different measure.
+- **The analyst rating slots are not in the order they look to be.** The
+  payload holds `[29, "StrongBuy", 25, 0, 4]` for an instrument the page
+  renders as "Buy 25 | Hold 4 | Sell 0", so the third count is SELL and the
+  fourth is HOLD. Because that is surprising, it is checked at runtime: the
+  counts must sum to the stated total and must not contradict the verdict,
+  and the three are nulled rather than emitted when they do.
+
+
 ## [0.1.0] — 2026-09-22
 
 First release. Three modes, three engines, all run live against the real site
@@ -70,5 +142,6 @@ first:
   address. `unsupported_client` is therefore its own state and never counts
   as blocked.
 
-[Unreleased]: https://github.com/2scraper/google-finance-scraper/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/2scraper/google-finance-scraper/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/2scraper/google-finance-scraper/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/2scraper/google-finance-scraper/releases/tag/v0.1.0

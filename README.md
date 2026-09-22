@@ -7,11 +7,14 @@
 [![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20Puppeteer-informational)](#engines)
 [![runs without an account](https://img.shields.io/badge/runs-without%20an%20account-success)](#what-you-actually-need)
 
-Scrapes **Google Finance** — instrument quotes, the market index and sector
-strips, currency, crypto and futures, and the day's gainers, losers and
-most-active — with Playwright, Selenium, Puppeteer, or the 2Captcha
-**Scraping Browser API** over CDP. JSON and CSV out, one row schema shared
-with the rest of this family.
+Scrapes **Google Finance** — instrument quotes, quarterly financials, analyst
+ratings and price targets, OHLCV bars, the market index and sector strips,
+currency, crypto and futures, the day's gainers and losers, and the earnings
+calendar — with Playwright, Selenium, Puppeteer, or the 2Captcha **Scraping
+Browser API** over CDP. JSON and CSV out.
+
+Seven modes, all reading the page's own server-rendered payload. **No key, no
+proxy, no account.**
 
 ---
 
@@ -27,6 +30,10 @@ Helsinki, AS24940) on **2026-09-22**, with no credential of any kind:
 | `--mode markets --market US` | **46 rows**, every one priced |
 | `--mode movers --market US` | **11 rows** across three lists |
 | `--mode quote --symbols GOOGL:NASDAQ,BMW:ETR,EUR-USD,BTC-USD` | **4 rows in 8.3 s** |
+| `--mode financials --symbols GOOGL:NASDAQ` | **90 quarters**, back to 2004 |
+| `--mode analysts --symbols GOOGL:NASDAQ` | **44 analyst actions** + the consensus |
+| `--mode chart --symbols GOOGL:NASDAQ` | **99 bars** — 79 intraday, 20 daily |
+| `--mode earnings --market US` | **5 upcoming announcements** |
 
 The reason this site is unusually open is worth stating plainly, because it
 changes what the paid products are for: **on Google Finance the market is a
@@ -78,6 +85,19 @@ python3 playwright_scraper.py --mode markets --market DE --category currency
 
 # the day's movers
 python3 playwright_scraper.py --mode movers --market GB --out movers
+
+# quarterly financials, back to 2004 on a large cap
+python3 playwright_scraper.py --mode financials --symbols GOOGL:NASDAQ
+
+# the consensus, the target range, and every published analyst action
+python3 playwright_scraper.py --mode analysts --symbols GOOGL:NASDAQ
+
+# OHLCV — the latest session at 5-minute resolution AND a month of daily
+# bars, in one run with no extra fetch
+python3 playwright_scraper.py --mode chart --symbols GOOGL:NASDAQ,BMW:ETR
+
+# who reports this week
+python3 playwright_scraper.py --mode earnings --market US
 ```
 
 ### Symbol spelling, and the one trap
@@ -96,13 +116,29 @@ it returns HTTP 200 with Google's own *Page Not Found*, and the string
 
 ## Modes
 
+**Instrument modes** — one `--symbols` entry each, one page fetch each:
+
+| mode | reads | rows (GOOGL:NASDAQ, 2026-09-22) |
+|---|---|---|
+| `quote` | the current quote | **1** — open/high/low, volume, market cap, industry, extended hours |
+| `financials` | one row per reporting period | **90** quarters back to 2004 — revenue, net income, operating expense, EBITDA, EPS, net margin, effective tax rate, and what the street estimated |
+| `analysts` | the consensus and every published action | **44** — verdict, buy/hold/sell split, 12-month target range, plus each firm, date, rating and price target |
+| `chart` | every OHLCV bar the page carries | **99** — 79 intraday (5-minute) and 20 daily |
+
+**Market modes** — one page fetch, geo-selected by `--market`:
+
 | mode | reads | rows (gl=US, 2026-09-22) |
 |---|---|---|
-| `quote` | one instrument page per `--symbols` entry | 1 per symbol, with open/high/low, volume, market cap, industry and the extended-hours quote |
 | `markets` | every strip on the market page | **46** — 20 indices, 11 sectors, 5 FX, 5 crypto, 5 futures |
 | `movers` | that page's gainers / losers / most-active | **11** |
+| `earnings` | its upcoming announcements calendar | **5**, with revenue and EPS estimates |
 
-### A limitation worth reading before you plan around it
+Everything above comes out of the **same first response**. The site's
+Overview / Analysis / Earnings / Financials tabs are rendered client-side
+from data that already arrived, so `--mode financials` costs exactly one
+page fetch — the same one `--mode quote` makes.
+
+### Three limitations worth reading before you plan around them
 
 **`movers` returns a PREVIEW, not a ranking.** Google retired the standalone
 `/finance/markets/gainers`, `/losers`, `/most-active`, `/currencies`,
@@ -117,11 +153,32 @@ The same change is why `markets` is the valuable mode here: the currency,
 crypto and futures strips it returns **are** what those retired URLs used to
 serve, and they are still published in full.
 
+**`--window` does not deepen the chart.** Every value from `5D` to `MAX`
+returns the same ~20 daily bars, because the deeper history is fetched
+client-side by an endpoint this repo does not implement. What you get for
+free is one full session at five-minute resolution plus about a month of
+daily bars.
+
+**`financials` exposes seven figures, not a full statement.** Google
+publishes 106 unlabelled numbers per quarter; seven of them were identified
+by matching the page's own rendered rows against every slot across four
+periods on four instruments in four currencies. The other 99 are left alone,
+because a mislabelled financial figure is worse than a missing one. EPS is
+null on instruments where Google publishes none — measured 0 of 88 periods
+on `7203:TYO`, against 90 of 90 on `GOOGL:NASDAQ` — and is deliberately not
+filled in from the adjacent basic-EPS slot, which is a different measure.
+
 ---
 
 ## Output
 
-One row per instrument, 32 columns, same JSON and CSV field order. See
+Five row classes, one per kind of thing. `quote`, `markets` and `movers`
+share `Quote` (32 columns); `financials`, `analysts`, `earnings` and `chart`
+each have their own. All five open with the same five columns — `source`,
+`scraped_at`, `url`, `sku`, `title` — so `sku` joins every mode to every
+other, and `diff_runs.py` refuses to compare two modes.
+
+The quote row, 32 columns, same JSON and CSV field order. See
 [`sample_output.json`](sample_output.json) — cut from a real run, not
 written by hand.
 

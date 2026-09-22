@@ -43,9 +43,10 @@ from contextlib import redirect_stdout, redirect_stderr
 import output_writer
 import page_flow
 import product_parser as pp
-from output_writer import (Quote, Product, dedupe_by_key, finish_run,
-                           DEDUPE_KEY_BY_MODE, ROW_CLASS_BY_MODE,
-                           SOURCE_DEFAULT)
+from output_writer import (Quote, Product, Financial, AnalystRating,
+                           EarningsEvent, ChartPoint, dedupe_by_key,
+                           finish_run, DEDUPE_KEY_BY_MODE,
+                           ROW_CLASS_BY_MODE, SOURCE_DEFAULT)
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 FIXTURES_PATH = os.path.join(REPO_ROOT, "fixtures_generated.json")
@@ -95,7 +96,11 @@ def _fx(name):
 
 def _rows(name):
     f = _fx(name)
-    return pp.parse_products(f["html"], f["url"], mode=f["mode"],
+    # `page=1` because that is what a one-symbol run passes, and the
+    # fixtures were generated the same way — a re-parse that differed from
+    # the recorded rows by one column would be a suite testing itself
+    # rather than the parser.
+    return pp.parse_products(f["html"], f["url"], mode=f["mode"], page=1,
                              market=pp.market_from_url(f["url"]))
 
 
@@ -277,15 +282,17 @@ def test_zero_is_not_a_measurement():
     # The index DOES have a volume, so the rule must not null everything.
     ok &= check("an index keeps its real volume",
                 _rows("quote_index")[0].volume == 3278075312)
-    # Across every fixture, no row carries either sentinel.
+    # Across every fixture of every mode, no row carries either sentinel.
+    # `getattr` rather than attribute access because the mode-C row classes
+    # legitimately have no such column — and a sweep that crashed on the
+    # first one would have stopped checking the rest.
     everything = [r for n, f in FIXTURES.items() if "rows" in f
                   for r in _rows(n)]
-    ok &= check("no row anywhere carries market_cap == 0",
-                not [r for r in everything if r.market_cap == 0])
-    ok &= check("no row anywhere carries volume == 0",
-                not [r for r in everything if r.volume == 0])
-    ok &= check("no row anywhere carries a price of 0",
-                not [r for r in everything if r.price == 0])
+    ok &= check("the sweep covers every mode (%d rows)" % len(everything),
+                len(everything) > 400)
+    for col in ("market_cap", "volume", "price", "revenue", "eps"):
+        ok &= check("no row of any mode carries %s == 0" % col,
+                    not [r for r in everything if getattr(r, col, None) == 0])
     return ok
 
 
@@ -682,22 +689,40 @@ def test_output_contract():
     ok &= check("Product is still an alias for the row class",
                 Product is Quote)
     ok &= check("source is this site", SOURCE_DEFAULT == "google.com/finance")
-    ok &= check("every mode maps to the row class",
-                set(ROW_CLASS_BY_MODE) == {"quote", "markets", "movers"}
-                and set(ROW_CLASS_BY_MODE.values()) == {Quote})
-    # No dead columns: every field must be populated on at least one row of
-    # at least one fixture, or it should not exist (CLAUDE.md §9).
-    populated = set()
+    ok &= check("every mode maps to a row class",
+                set(ROW_CLASS_BY_MODE) == set(pp.ALL_MODES))
+    ok &= check("the three quote-page list modes share the Quote class",
+                {ROW_CLASS_BY_MODE[m] for m in ("quote", "markets", "movers")}
+                == {Quote})
+    ok &= check("each mode-C mode has its own row class",
+                [ROW_CLASS_BY_MODE[m] for m in
+                 ("financials", "analysts", "earnings", "chart")]
+                == [Financial, AnalystRating, EarningsEvent, ChartPoint])
+    ok &= check("every mode-C row class keeps the family prefix",
+                all([f.name for f in dataclasses.fields(c)][:5]
+                    == ["source", "scraped_at", "url", "sku", "title"]
+                    for c in (Financial, AnalystRating, EarningsEvent,
+                              ChartPoint)))
+    # No dead columns, checked PER ROW CLASS: every field of every class
+    # must be populated on at least one row of at least one fixture, or it
+    # should not exist (CLAUDE.md §9). Pooling them across classes would let
+    # a dead column in one class be covered by a same-named live one in
+    # another.
+    populated = {}
     for name, f in FIXTURES.items():
         if "rows" not in f:
             continue
         for r in _rows(name):
+            bucket = populated.setdefault(type(r).__name__, set())
             for k, v in dataclasses.asdict(r).items():
                 if v is not None:
-                    populated.add(k)
-    dead = [n for n in names if n not in populated]
-    ok &= check("no column is null on every row of every fixture (%s)"
-                % (dead or "none"), not dead)
+                    bucket.add(k)
+    for cls in (Quote, Financial, AnalystRating, EarningsEvent, ChartPoint):
+        got = populated.get(cls.__name__, set())
+        want = {f.name for f in dataclasses.fields(cls)}
+        dead = sorted(want - got)
+        ok &= check("%s has no column null on every row (%s)"
+                    % (cls.__name__, dead or "none"), not dead)
     # Dedupe: the list modes need a compound key.
     ok &= check("quote dedupes on sku alone",
                 DEDUPE_KEY_BY_MODE.get("quote", "sku") == "sku")
@@ -721,6 +746,299 @@ def test_output_contract():
     ok &= check("compound dedupe keeps both of its rows",
                 len(dedupe_by_key(list(movers), set(), ("sku", "listing")))
                 == len(movers))
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Mode C
+# ---------------------------------------------------------------------------
+
+def test_financial_values():
+    group("financials: the seven slots, pinned on real fixtures")
+    ok = True
+    rows = _rows("financials_us")
+    ok &= check("90 periods on the Alphabet capture", len(rows) == 90)
+    q = next((r for r in rows if (r.fiscal_year, r.fiscal_quarter) == (2026, 2)),
+             None)
+    if not check("2026 Q2 is present", q is not None):
+        return False
+    # VALUES, not coverage. Each of these was established by matching the
+    # page's own rendered figure against every payload slot across four
+    # periods on four instruments — see output_writer.Financial. Pinning
+    # them is what stops a future refactor quietly reading slot 8 as
+    # revenue.
+    ok &= check("revenue", q.revenue == 119796000000.0)
+    ok &= check("net income", q.net_income == 112193000000.0)
+    ok &= check("operating expense", q.operating_expense == 33083000000.0)
+    ok &= check("EBITDA", q.ebitda == 48241000000.0)
+    ok &= check("earnings per share", q.eps == 9.11)
+    ok &= check("net profit margin", q.net_profit_margin == 93.65)
+    ok &= check("effective tax rate", q.effective_tax_rate == 19.14)
+    ok &= check("period end", q.period_end == "2026-06-30")
+    ok &= check("currency", q.currency == "USD")
+    ok &= check("a recent quarter is detailed", q.detailed is True)
+    # EPS matched slots 2 AND 9 on this instrument — the coincidence that
+    # makes a one-instrument mapping a coin toss. So the discriminating pin
+    # is on a period where the two slots DISAGREE: BMW's 2026 Q1 has slot 2
+    # empty and slot 9 populated, so a parser reading slot 2 returns None
+    # here and this check goes red. A pin on a period where both agree
+    # would pass against the wrong slot, which is the whole failure mode.
+    de = _rows("financials_de")
+    deq2 = next((r for r in de if (r.fiscal_year, r.fiscal_quarter) == (2026, 2)),
+                None)
+    deq1 = next((r for r in de if (r.fiscal_year, r.fiscal_quarter) == (2026, 1)),
+                None)
+    ok &= check("the German fixture reads EUR",
+                deq2 is not None and deq2.currency == "EUR")
+    ok &= check("EPS on a period where the two candidate slots disagree",
+                deq1 is not None and deq1.eps == 2.68)
+    # And the measured absence, pinned so that nobody "fixes" it by falling
+    # back to the other slot. Basic and diluted EPS are different measures,
+    # and filling one column from either would make it mean different things
+    # on different rows.
+    jp_rows = _rows("financials_jp")
+    ok &= check("Toyota's EPS is null on every period, because Google "
+                "publishes none in that slot",
+                all(r.eps is None for r in jp_rows))
+    ok &= check("...while its revenue IS published (so this is a measured "
+                "absence, not a broken parse)",
+                sum(1 for r in jp_rows if r.revenue is not None) > 50)
+    jp = jp_rows
+    ok &= check("the Japanese fixture reads JPY",
+                jp and jp[0].currency == "JPY")
+    ok &= check("a JPY revenue is in the trillions, not mis-scaled",
+                jp[0].revenue is not None and jp[0].revenue > 1e12)
+
+    # The two widths the site publishes, reported rather than smoothed over.
+    detailed = [r for r in rows if r.detailed]
+    summary = [r for r in rows if not r.detailed]
+    ok &= check("the capture carries both detailed and summary periods",
+                len(detailed) >= 4 and len(summary) >= 20)
+    ok &= check("summary periods still carry revenue and EPS",
+                all(r.revenue is not None for r in summary[:5]))
+    ok &= check("summary periods carry no EBITDA (the slot is past the "
+                "array's end)", all(r.ebitda is None for r in summary))
+    # Estimates, read from the other direction — the only two slots a
+    # not-yet-reported period carries.
+    ok &= check("a reported quarter carries an estimate beside its actual",
+                q.revenue_estimate is not None and q.eps_estimate is not None)
+    ok &= check("the estimate is not the actual",
+                q.revenue_estimate != q.revenue)
+    # Periods are unique, which is what the dedupe key assumes.
+    keys = {(r.fiscal_year, r.fiscal_quarter) for r in rows}
+    ok &= check("every period appears once", len(keys) == len(rows))
+    ok &= check("quarters are in range",
+                all(1 <= r.fiscal_quarter <= 4 for r in rows))
+    return ok
+
+
+def test_analyst_values():
+    group("analysts: the consensus, and the slot order that is not obvious")
+    ok = True
+    rows = _rows("analysts_us")
+    ok &= check("44 actions on the Alphabet capture", len(rows) == 44)
+    r = rows[0]
+    ok &= check("consensus verdict", r.consensus == "StrongBuy")
+    ok &= check("analyst total", r.analysts_total == 29)
+    # THE check this mode exists to protect. The payload holds [29,
+    # "StrongBuy", 25, 0, 4] and the page renders "Buy 25 | Hold 4 | Sell 0"
+    # — so slot 9 is SELL and slot 10 is HOLD, read live from the rendered
+    # Analysis tab. The obvious reading swaps them on every row.
+    ok &= check("buy count", r.buy_count == 25)
+    ok &= check("hold count is the FOURTH slot, not the third",
+                r.hold_count == 4)
+    ok &= check("sell count is the THIRD slot", r.sell_count == 0)
+    ok &= check("the three counts sum to the total",
+                r.buy_count + r.hold_count + r.sell_count == r.analysts_total)
+    ok &= check("target range", (r.target_low, r.target_high, r.target_mean)
+                == (379.0, 485.0, 429.31))
+    ok &= check("upside is Google's figure, not recomputed",
+                r.target_upside_pct == 22.82)
+    ok &= check("target currency", r.target_currency == "USD")
+    ok &= check("the consensus is repeated on every row",
+                len({(x.consensus, x.analysts_total) for x in rows}) == 1)
+
+    # The individual actions.
+    ok &= check("every row names its analyst",
+                all(x.analyst for x in rows))
+    ok &= check("every row names its firm", all(x.firm for x in rows))
+    ok &= check("action dates are ISO", all(
+        re.match(r"^\d{4}-\d{2}-\d{2}$", x.action_date or "") for x in rows))
+    ok &= check("most actions carry a price target",
+                sum(1 for x in rows if x.price_target is not None) >= 35)
+    first = rows[0]
+    ok &= check("the first action's fields are read, not shuffled",
+                (first.analyst, first.firm, first.action, first.action_date,
+                 first.price_target)
+                == ("Ivan Feinseth", "Tigress Financial", "Buy",
+                    "2026-09-17", 485.0))
+    ok &= check("its headline is the note's, not the byline",
+                (first.headline or "").startswith("Alphabet price target"))
+
+    # A second instrument, where the split is not degenerate.
+    de = _rows("analysts_de")
+    d = de[0]
+    ok &= check("BMW consensus", d.consensus == "Buy")
+    ok &= check("BMW split sums to its total",
+                d.buy_count + d.hold_count + d.sell_count == d.analysts_total)
+    ok &= check("BMW has a non-zero hold and sell (a degenerate split would "
+                "not test the order)", d.hold_count > 0 and d.sell_count > 0)
+
+    # The downgrade, controlled: a payload that disagrees with itself must
+    # null the three counts rather than emit a possibly-swapped one.
+    rec = pp._consensus_record(pp.payload(_fx("analysts_us")["html"]))
+    ok &= check("the real record passes the invariant",
+                pp.rating_breakdown(rec)["buy_count"] == 25)
+    broken = list(rec)
+    broken[6] = 99                      # total that no longer matches
+    ok &= check("a total that does not match nulls the split",
+                pp.rating_breakdown(broken) ==
+                {"buy_count": None, "hold_count": None, "sell_count": None})
+    swapped = list(rec)
+    swapped[8], swapped[9] = swapped[9], swapped[8]   # buy <-> sell
+    ok &= check("a buy verdict with more sells than buys nulls the split",
+                pp.rating_breakdown(swapped)["buy_count"] is None)
+    return ok
+
+
+def test_earnings_values():
+    group("earnings: the market page's calendar")
+    ok = True
+    rows = _rows("earnings_us")
+    ok &= check("5 events on the gl=US capture", len(rows) == 5)
+    r = rows[0]
+    ok &= check("sku is the instrument", r.sku == "AZO:NYSE")
+    ok &= check("company name", r.title == "AutoZone Inc")
+    ok &= check("Google's own event wording",
+                "Earnings" in (r.event_title or ""))
+    ok &= check("event date is ISO", r.event_date == "2026-09-22")
+    ok &= check("fiscal period", (r.fiscal_year, r.fiscal_quarter) == (2026, 4))
+    ok &= check("period end", r.period_end == "2026-08-31")
+    ok &= check("currency", r.currency == "USD")
+    # The two slots a not-yet-reported period carries, and the reason the
+    # financials slot map can be trusted from the other direction.
+    ok &= check("revenue estimate", r.revenue_estimate == 6700366520.0)
+    ok &= check("EPS estimate", round(r.eps_estimate, 2) == 53.84)
+    ok &= check("every event names an instrument", all(x.sku for x in rows))
+    ok &= check("every event has a date", all(x.event_date for x in rows))
+    ok &= check("events are unique by (sku, date)",
+                len({(x.sku, x.event_date) for x in rows}) == len(rows))
+    # A non-USD event proves the currency is read rather than defaulted.
+    ok &= check("a non-USD event is read as its own currency",
+                any(x.currency and x.currency != "USD" for x in rows))
+    return ok
+
+
+def test_chart_values():
+    group("chart: two intervals, and the bar that was mislabelled")
+    ok = True
+    rows = _rows("chart_us")
+    ok &= check("99 bars on the Alphabet capture", len(rows) == 99)
+    daily = [r for r in rows if r.interval == "1d"]
+    intraday = [r for r in rows if r.interval == "5m"]
+    ok &= check("20 daily bars", len(daily) == 20)
+    ok &= check("79 intraday bars", len(intraday) == 79)
+    ok &= check("intraday covers one session",
+                len({r.ts[:10] for r in intraday}) == 1)
+    ok &= check("daily covers many days",
+                len({r.ts[:10] for r in daily}) == len(daily))
+
+    # THE regression. The current session's DAILY bar carries the same
+    # timestamp as that session's last five-minute bar, so a per-bar
+    # date-grouping label put a whole-day bar in the intraday series — with
+    # the session's open, high, low and volume on it. It was found because
+    # the three engines stopped agreeing on row 97.
+    last_day = max(r.ts[:10] for r in daily)
+    same_ts = [r for r in rows if r.ts.startswith(last_day + "T16:00")]
+    ok &= check("two bars really do share that timestamp (the trap is real)",
+                len(same_ts) == 2)
+    ok &= check("...and they are labelled differently",
+                {r.interval for r in same_ts} == {"1d", "5m"})
+    ok &= check("no (interval, ts) pair repeats",
+                len({(r.interval, r.ts) for r in rows}) == len(rows))
+    session = next(r for r in same_ts if r.interval == "1d")
+    minute = next(r for r in same_ts if r.interval == "5m")
+    ok &= check("the daily bar carries the whole session's volume",
+                session.volume > minute.volume * 5)
+
+    # OHLC sanity on every bar of every chart fixture.
+    for name in ("chart_us", "chart_de"):
+        bars = _rows(name)
+        ok &= check("%s: low <= open,close <= high on every bar" % name,
+                    all(b.low <= b.open <= b.high and b.low <= b.close <= b.high
+                        for b in bars))
+        ok &= check("%s: every bar has a volume" % name,
+                    all(b.volume is not None for b in bars))
+        ok &= check("%s: positions are unique" % name,
+                    len({b.position for b in bars}) == len(bars))
+    # Close is SECOND in the payload, verified against the quote record's own
+    # fields — which come from a different part of the payload entirely.
+    quote = _rows("quote_stock_us")[0]
+    current = next(r for r in daily if r.ts.startswith(last_day))
+    ok &= check("the current session's daily bar agrees with the quote "
+                "record's open/high/low",
+                (current.open, current.high, current.low)
+                == (quote.open, quote.day_high, quote.day_low))
+    return ok
+
+
+def test_instrument_selection_is_deterministic():
+    group("a page with two quotes for one instrument picks the freshest")
+    ok = True
+    # The 2026-09-22 Shell capture holds TWO rich records for SHEL:LON taken
+    # 13 seconds apart — the page updates its quote while being served — so
+    # "the first record walked" made the parse depend on which blobs a
+    # document happened to carry. A trimmed fixture and its capture then
+    # disagreed about the price while reporting the same row count.
+    capture = os.path.join(REPO_ROOT, "captures", "quote_stock_gb.html")
+    if not os.path.exists(capture):
+        print("  NOTE  captures/ absent; this check needs quote_stock_gb.html")
+        return ok
+    html = open(capture, encoding="utf-8", errors="replace").read()
+    url = "https://www.google.com/finance/beta/quote/SHEL:LON"
+    data = pp.payload(html)
+    matches = [r for r in pp._rich_records(data) if r[13] == "SHEL:LON"]
+    ok &= check("the capture really carries more than one record for it",
+                len(matches) > 1)
+    stamps = [pp._epoch_iso(r[19][11]) for r in matches]
+    ok &= check("their timestamps differ", len(set(stamps)) > 1)
+    chosen = pp._subject_record(data, "SHEL:LON")
+    ok &= check("the freshest is chosen",
+                pp._epoch_iso(chosen[19][11]) == max(s for s in stamps if s))
+    # And the same page parsed twice gives the same row.
+    a = pp.parse_products(html, url, mode="quote")[0]
+    b = pp.parse_products(html, url, mode="quote")[0]
+    ok &= check("two parses of one page agree", a.price == b.price)
+    return ok
+
+
+def test_every_mode_is_order_independent():
+    group("every mode survives the payload being reordered")
+    ok = True
+    # The shape-anchoring check extended to all seven modes. Reversing blob
+    # order must change no row — not the values, and not the ORDER, because
+    # `position` is a column a consumer diffs on. Two of this repo's bugs
+    # were exactly this: markets rows came out sectors-first from one blob
+    # subset and indices-first from another, and two chart series holding a
+    # bar with the same timestamp ordered differently under different walks.
+    cases = [(n, f) for n, f in FIXTURES.items() if "rows" in f]
+    ok &= check("there are fixtures for every mode to reorder",
+                {f["mode"] for _, f in cases} == set(pp.ALL_MODES))
+    for name, f in cases:
+        blobs = re.findall(r"AF_initDataCallback\(\{.*?\}\);", f["html"], re.S)
+        if len(blobs) < 2:
+            continue
+        head = f["html"][:f["html"].index(blobs[0])]
+        reordered = head + "".join(reversed(blobs)) + "</body></html>"
+        before = _rows(name)
+        after = pp.parse_products(reordered, f["url"], mode=f["mode"], page=1,
+                                  market=pp.market_from_url(f["url"]))
+        sig_b = [dataclasses.asdict(r) for r in before]
+        sig_a = [dataclasses.asdict(r) for r in after]
+        for row in sig_b + sig_a:
+            row.pop("scraped_at", None)
+        ok &= check("%s (%s): reversing blob order changes nothing"
+                    % (name, f["mode"]), sig_a == sig_b)
     return ok
 
 
@@ -1291,6 +1609,70 @@ def test_ci_checks_is_wired_up():
     return ok
 
 
+def test_canary_is_coherent():
+    group("the canary tests what it claims to")
+    ok = True
+    path = os.path.join(REPO_ROOT, ".github", "workflows", "canary.yml")
+    if not os.path.isdir(os.path.join(REPO_ROOT, ".github")):
+        print("  NOTE  no .github/ in this tree (the Docker image); skipped")
+        return ok
+    ok &= check("canary.yml exists", os.path.exists(path))
+    if not os.path.exists(path):
+        return ok
+    wf = open(path, encoding="utf-8").read()
+
+    # It must need no secrets. This repo's central claim is that the site
+    # needs none, and a canary gated on one would go green every day while
+    # testing nothing — CLAUDE.md §21's other half.
+    ok &= check("the canary is not gated on a secret",
+                "secrets." not in wf)
+    ok &= check("it runs on a schedule, not only on dispatch",
+                "schedule:" in wf and "cron:" in wf)
+
+    # Every mode must be under daily test, or a mode can rot unnoticed.
+    for mode in pp.ALL_MODES:
+        ok &= check("the canary exercises --mode %s" % mode,
+                    "--mode %s" % mode in wf or
+                    ('for mode in' in wf and mode in wf))
+
+    # `set +e` before capturing an exit code: GitHub runs `run:` steps under
+    # `bash -e`, so without it a non-zero scraper exit aborts the step before
+    # the `echo exit_code` line and the verdict reads an empty string.
+    captures = wf.count('exit_code=$')
+    ok &= check("every exit-code capture is preceded by `set +e` (%d captures,"
+                " %d guards)" % (captures, wf.count("set +e")),
+                wf.count("set +e") >= captures - 1)
+
+    # Exit 5 must be a DEFECT here, not a warning. The siblings warn on it
+    # because their canaries use a credentialled remote API; this one uses
+    # none, so warning would be carrying another repo's excuse.
+    five = re.search(r'^\s*5\)\s*$.{0,600}', wf, re.S | re.M)
+    ok &= check("exit 5 is treated as a defect, not an access condition",
+                bool(five) and "::error::" in five.group(0))
+    three = re.search(r'^\s*3\)\s*$.{0,900}', wf, re.S | re.M)
+    ok &= check("exit 3 is treated as an access condition, not a defect",
+                bool(three) and "::warning::" in three.group(0))
+
+    # The assertion block must be extractable and syntactically valid — a
+    # canary whose Python does not parse fails at 2am rather than here.
+    m = re.search(r"python3 - <<'PY'\n(.*?)\n\s*PY\n", wf, re.S)
+    ok &= check("the assertion block is present", bool(m))
+    if m:
+        body = textwrap.dedent(m.group(1))
+        try:
+            ast.parse(body)
+            parsed = True
+        except SyntaxError:
+            parsed = False
+        ok &= check("the assertion block parses as Python", parsed)
+        ok &= check("it asserts on the financial slot map, which nothing "
+                    "else tests daily",
+                    "net_profit_margin" in body and "ebitda" in body)
+        ok &= check("it asserts both chart intervals are present",
+                    '"5m", "1d"' in body or "{'5m', '1d'}" in body)
+    return ok
+
+
 def test_engines(skips):
     group("engines (import-guarded)")
     ok = True
@@ -1360,6 +1742,12 @@ def main() -> int:
     ok &= test_symbol_matching()
     ok &= test_urls()
     ok &= test_there_is_no_pagination()
+    ok &= test_financial_values()
+    ok &= test_analyst_values()
+    ok &= test_earnings_values()
+    ok &= test_chart_values()
+    ok &= test_instrument_selection_is_deterministic()
+    ok &= test_every_mode_is_order_independent()
     ok &= test_output_contract()
     ok &= test_finish_run_exit_codes()
     ok &= test_policy_constants_have_consumers()
@@ -1373,6 +1761,7 @@ def main() -> int:
     ok &= test_dockerfile_copies_what_it_imports()
     ok &= test_sample_output_matches_the_schema()
     ok &= test_ci_checks_is_wired_up()
+    ok &= test_canary_is_coherent()
     ok &= test_engines(skips)
     ok &= test_concurrency_machinery(skips)
 

@@ -201,6 +201,269 @@ class Quote:
     position: Optional[int] = None
 
 
+# ---------------------------------------------------------------------------
+# The mode-C row classes
+# ---------------------------------------------------------------------------
+# Four more kinds of thing, four more dataclasses. CLAUDE.md §9 allows this —
+# "a repo that genuinely reads more than one KIND of thing may add a second
+# dataclass" — and sets the conditions, all of which are met here: the family
+# prefix stays byte-identical and in order, `sku` keeps meaning the
+# instrument, the sidecar records the `mode` because the repo no longer
+# implies it, and diff_runs.py refuses a mode it cannot compare rather than
+# producing a diff whose every line is an artefact.
+#
+# These are genuinely different objects rather than a quote with extra
+# columns: a financial period is not an instrument, an analyst action is not
+# an instrument, and folding any of them into `Quote` would give a row class
+# where most columns are null on most rows.
+
+
+@dataclass
+class Financial:
+    """One row per reporting PERIOD of one instrument.
+
+    Google publishes 106 figures per recent quarter and 18 for older ones,
+    in a bare positional array with NO labels anywhere in the payload. Seven
+    of those slots are exposed here and the other 99 are deliberately not,
+    because a mislabelled financial figure is worse than a missing one.
+
+    HOW THE SEVEN WERE ESTABLISHED, since this is the one place in the repo
+    where a plausible-looking guess would survive every check:
+
+    The page RENDERS eight labelled rows. Each rendered value was matched
+    against every payload slot across four consecutive periods, and only a
+    slot that matched the label in EVERY period on EVERY instrument was
+    accepted. Run over four instruments in four currencies — GOOGL:NASDAQ
+    (USD), BMW:ETR (EUR), 7203:TYO (JPY) and SHEL:LON (GBP) — on 2026-09-22:
+
+        Revenue               slot 0
+        Net income            slot 1
+        Net profit margin     slot 3
+        Earnings per share    slot 9
+        EBITDA                slot 20
+        Effective tax rate    slot 21
+        Operating expense     slot 38
+
+    The method earned its keep immediately. Earnings per share matched slots
+    2 AND 9 on Alphabet and only slot 9 on BMW — so a mapping derived from
+    one instrument had an even chance of reading the wrong column, on the
+    figure a reader is most likely to check. This is the same failure a
+    sibling shipped as a review count of 445279961 on every row of every run
+    with a green coverage check beside it.
+
+    ONE SLOT IS LEFT NULL ON PURPOSE, which is worth knowing before anyone
+    "fixes" it. Slot 2 holds a second earnings-per-share figure that agrees
+    with slot 9 to the penny where both exist and differs in the last digit
+    on one measured quarter (2.81 against 2.82 on Alphabet) — the two are
+    basic and diluted EPS. Slot 9 is the one the page labels "Earnings per
+    share", so slot 9 is what `eps` reads. Measured coverage on 2026-09-22:
+
+        GOOGL:NASDAQ   90 of 90 periods
+        SHEL:LON       85 of 85
+        BMW:ETR        86 of 89
+        7203:TYO        0 of 88
+
+    Toyota is not a bug. Google publishes no figure in that slot for it, and
+    slot 2 is NOT substituted in, because the two are different measures and
+    filling one column from either would make `eps` mean different things on
+    different rows — a guess wearing a fact's clothes, and invisible once it
+    is in a spreadsheet. A null here means Google published none.
+
+    `revenue_estimate` and `eps_estimate` come from slots 8 and 10, and those
+    were read from a different direction: on a FUTURE period — an earnings
+    event that has not happened — slots 8 and 10 are the only two populated,
+    beside the currency and the period end. On Alphabet's reported quarter
+    slot 8 is 117.0B against an actual 119.8B in slot 0, and slot 10 is 2.91
+    against an actual 9.11 in slot 9, on a quarter whose 93.65% net margin
+    says plainly that something extraordinary landed in it. A beat of that
+    shape is what an estimate looks like beside an actual.
+    """
+    source: str = SOURCE_DEFAULT
+    scraped_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    url: str = ""
+    # The instrument, in the same spelling `Quote.sku` uses, so a financials
+    # run joins to a quote run on one column.
+    sku: Optional[str] = None
+    title: Optional[str] = None
+
+    # --- the period ----------------------------------------------------
+    fiscal_year: Optional[int] = None
+    # 1-4. Google publishes quarters here and no annual roll-up, so a
+    # consumer wanting a year sums four rows rather than reading one.
+    fiscal_quarter: Optional[int] = None
+    # ISO date of the period's last day, as the payload states it.
+    period_end: Optional[str] = None
+    currency: Optional[str] = None
+
+    # --- the seven verified figures -------------------------------------
+    revenue: Optional[float] = None
+    net_income: Optional[float] = None
+    operating_expense: Optional[float] = None
+    ebitda: Optional[float] = None
+    eps: Optional[float] = None
+    net_profit_margin: Optional[float] = None
+    effective_tax_rate: Optional[float] = None
+
+    # --- what the street expected ----------------------------------------
+    revenue_estimate: Optional[float] = None
+    eps_estimate: Optional[float] = None
+
+    # True when the payload carried the full 106-slot array for this period
+    # and False when it carried the 18-slot summary. Measured on Alphabet:
+    # the 8 most recent quarters are detailed and everything back to 2004 is
+    # summary — so a run's older rows legitimately carry fewer figures, and
+    # this column is how a consumer tells that from a parsing failure.
+    detailed: Optional[bool] = None
+    page: Optional[int] = None
+    position: Optional[int] = None
+
+
+@dataclass
+class AnalystRating:
+    """One row per analyst ACTION, with the instrument's consensus on each.
+
+    Denormalised on purpose. The consensus is one record per instrument and
+    the actions are many, and splitting them into two row classes would give
+    a CSV a consumer has to join by hand. Repeating seven consensus columns
+    is cheaper than that, and it makes every row self-contained.
+
+    Where an instrument has a consensus and no published actions, ONE row is
+    emitted with the action columns null — a consensus is the more valuable
+    half and dropping it because nobody published a note would be a silent
+    loss.
+
+    THE RATING BREAKDOWN'S SLOT ORDER IS NOT WHAT IT LOOKS LIKE. The payload
+    holds [total, verdict, 25, 0, 4] for an instrument the page renders as
+    "Based on 29 analysts ... Buy 25 | Hold 4 | Sell 0" — read live from the
+    rendered Analysis tab on 2026-09-22. So the third slot is SELL and the
+    fourth is HOLD, not the other way round, and the obvious reading would
+    have swapped them on every row.
+
+    Because that order is surprising, it is also CHECKED at runtime rather
+    than trusted: `buy + hold + sell` must equal the stated total, and a
+    buy-leaning verdict must not come with more sells than buys. When either
+    fails, the three counts are nulled and the total kept — a downgrade
+    rather than a mislabel, the same answer this repo gives when the movers
+    lists stop looking like gainers and losers.
+    """
+    source: str = SOURCE_DEFAULT
+    scraped_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    url: str = ""
+    sku: Optional[str] = None
+    title: Optional[str] = None
+
+    # --- the consensus, repeated on every row ---------------------------
+    # Google's own verdict word: "StrongBuy", "Buy", "Hold", "Sell",
+    # "StrongSell". Kept verbatim rather than normalised — it is a label the
+    # site chose, not a value this repo computes.
+    consensus: Optional[str] = None
+    analysts_total: Optional[int] = None
+    buy_count: Optional[int] = None
+    hold_count: Optional[int] = None
+    sell_count: Optional[int] = None
+    target_low: Optional[float] = None
+    target_high: Optional[float] = None
+    target_mean: Optional[float] = None
+    # Percent above the current price that `target_mean` implies, as Google
+    # states it — not recomputed here, because recomputing it from two
+    # numbers read at different moments would produce a figure the site
+    # never published.
+    target_upside_pct: Optional[float] = None
+    target_currency: Optional[str] = None
+
+    # --- the individual action ------------------------------------------
+    analyst: Optional[str] = None
+    firm: Optional[str] = None
+    # The firm's own word for what it did: "Buy", "Hold", "Sell".
+    action: Optional[str] = None
+    action_date: Optional[str] = None
+    price_target: Optional[float] = None
+    headline: Optional[str] = None
+    headline_url: Optional[str] = None
+    page: Optional[int] = None
+    position: Optional[int] = None
+
+
+@dataclass
+class EarningsEvent:
+    """One row per upcoming earnings announcement.
+
+    Read from the market page rather than from a quote page, so this mode
+    answers "who reports this week" rather than "when does X report". 5
+    events published on the 2026-09-22 gl=US capture.
+
+    `revenue_estimate` and `eps_estimate` are the only two figures populated
+    on a period that has not happened yet — see `Financial`'s docstring for
+    how those two slots were identified, which is the same evidence read
+    from the other end.
+    """
+    source: str = SOURCE_DEFAULT
+    scraped_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    url: str = ""
+    sku: Optional[str] = None
+    title: Optional[str] = None
+    # Google's own phrasing, e.g. "Q4 2026 Earnings Announcement".
+    event_title: Optional[str] = None
+    # ISO date, and the local timestamp the payload states separately.
+    event_date: Optional[str] = None
+    event_at: Optional[str] = None
+    fiscal_year: Optional[int] = None
+    fiscal_quarter: Optional[int] = None
+    period_end: Optional[str] = None
+    currency: Optional[str] = None
+    revenue_estimate: Optional[float] = None
+    eps_estimate: Optional[float] = None
+    # Which market's calendar this came from — the market page is
+    # geo-selected, so a US calendar and a German one are different sets.
+    market: Optional[str] = None
+    page: Optional[int] = None
+    position: Optional[int] = None
+
+
+@dataclass
+class ChartPoint:
+    """One row per OHLCV bar.
+
+    The slot order is `[open, close, high, low, timestamp, volume]` — close
+    SECOND, which is not the usual spelling and was verified rather than
+    assumed: on the 2026-09-22 Alphabet capture the last daily bar reads
+    [350.64, 354.97, 357.61, 349.1] while the quote record, parsed from a
+    DIFFERENT part of the payload, gives open 350.64, price 354.97, high
+    357.61 and low 349.1. Confirmed again on BMW, where the last bar's
+    second slot equals the quote's previous close.
+
+    Two intervals are published in the first response and neither needs a
+    click or an XHR:
+
+        5m   the latest session, 78-99 bars
+        1d   about one month, 20-33 bars
+
+    `--window` does NOT deepen this. Measured on 2026-09-22: every window
+    value from 5D to MAX returned the same 20 daily bars, because the deeper
+    history is fetched client-side. Saying so is cheaper than letting a
+    reader conclude the flag is broken.
+    """
+    source: str = SOURCE_DEFAULT
+    scraped_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    url: str = ""
+    sku: Optional[str] = None
+    title: Optional[str] = None
+    # "5m" or "1d".
+    interval: Optional[str] = None
+    # The bar's own timestamp, exactly as the payload states it — with its
+    # venue's UTC offset, because a bar without its market's clock cannot be
+    # aligned against another market's.
+    ts: Optional[str] = None
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
+    volume: Optional[int] = None
+    currency: Optional[str] = None
+    page: Optional[int] = None
+    position: Optional[int] = None
+
+
 # Keep the family name pointing at the row class. `tests.yml` carries an
 # inline `from output_writer import Product`, and a sibling's first push to a
 # public repo went red on exactly that after renaming its row class with the
@@ -212,29 +475,38 @@ Product = Quote
 # an instrument quote — differing only in how many of them a page holds and
 # how richly each is described, so there is no second row class to keep in
 # step.
-ROW_CLASS_BY_MODE = {"quote": Quote, "markets": Quote, "movers": Quote}
+ROW_CLASS_BY_MODE = {
+    "quote": Quote, "markets": Quote, "movers": Quote,
+    "financials": Financial, "analysts": AnalystRating,
+    "earnings": EarningsEvent, "chart": ChartPoint,
+}
 
 # Modes whose rows are one-per-sku, and therefore safe to dedupe on `sku`
 # alone and to hand to diff_runs.py.
 #
 # Only `quote` qualifies, and that is measured rather than stylistic. A
 # stock can be a gainer and among the most active in the same session, so
-# one symbol lands in two of the root page's lists at once: counted on the
+# one symbol lands in two of the market page's lists at once: counted on the
 # 2026-09-22 captures, 2 symbols on the US market, 1 on the exit IP's own
-# and 0 on the German one. Deduping those on `sku` would silently drop
-# whichever list was parsed second and make the surviving row's `listing`
-# column depend on parse order. The list modes dedupe on (sku, listing)
-# instead — see DEDUPE_KEY_BY_MODE.
-#
-# `markets` is in the same boat for a different reason: its rows are unique
-# by symbol WITHIN a run, but a symbol's strip is a property of the run's
-# market, so the compound key is what keeps two markets' rows distinct if
-# anyone concatenates them.
+# and 0 on the German one. Every mode-C row is many-per-instrument by
+# construction — periods, actions, events, bars.
 UNIQUE_BY_SKU_MODES = ("quote",)
 
 # What makes a row unique, per mode. A mode absent from here dedupes on
-# `sku`.
-DEDUPE_KEY_BY_MODE = {"markets": ("sku", "listing"), "movers": ("sku", "listing")}
+# `sku`. Each key is the smallest tuple that is genuinely unique, checked
+# against real fixtures rather than reasoned about: an over-narrow key drops
+# good rows silently, and an over-wide one lets a repeated fetch duplicate
+# them.
+DEDUPE_KEY_BY_MODE = {
+    "markets": ("sku", "listing"),
+    "movers": ("sku", "listing"),
+    "financials": ("sku", "fiscal_year", "fiscal_quarter"),
+    # An analyst can rate one instrument more than once, so the date is part
+    # of the identity; the headline separates two notes on the same day.
+    "analysts": ("sku", "analyst", "action_date", "headline"),
+    "earnings": ("sku", "event_date"),
+    "chart": ("sku", "interval", "ts"),
+}
 
 
 def dedupe_by_key(rows: Sequence[Any], seen: Set[Any],

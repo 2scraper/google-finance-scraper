@@ -600,6 +600,42 @@ def _row_from_rich(r: Sequence[Any], *, url: str, market: Optional[str],
 # The three modes
 # --------------------------------------------------------------------------
 
+def _subject_record(data: Dict[str, Any], wanted: Optional[str]) -> Optional[list]:
+    """The rich record for the instrument this url asked for.
+
+    Picks the FRESHEST where a page carries more than one, and that is a
+    determinism fix rather than a nicety. The 2026-09-22 Shell capture holds
+    TWO rich records for SHEL:LON, taken 13 seconds apart — 3490.0 and
+    3489.5 — because the page updates its quote while it is being served.
+    Which one a walk reached first depended on which blobs were present, so
+    a trimmed fixture and the capture it was cut from disagreed about the
+    price, and two engines could disagree the same way.
+
+    Freshest is the defensible choice and the one a reader would expect: the
+    row then carries the last quote the page had, and `quoted_at` says when.
+    Records with no timestamp sort last rather than being dropped.
+
+    Returns None when the url names an instrument the page does not carry —
+    which is load-bearing, because the page chrome carries 35 instrument
+    records whatever the url asked for.
+    """
+    matches = [r for r in _rich_records(data)
+               if not wanted or _symbols_match(r[13], wanted)]
+    if not matches:
+        return None
+    if wanted is None and len(matches) > 1:
+        # No url to match against and several candidates: refuse rather
+        # than guess which instrument the caller meant.
+        return None
+
+    def freshness(rec):
+        nested = rec[19]
+        stamp = _epoch_iso(nested[11] if len(nested) > 11 else None)
+        return stamp or ""
+
+    return max(matches, key=freshness)
+
+
 def parse_product_page(html: Optional[str], url: str = "", *,
                        market: Optional[str] = None,
                        page: Optional[int] = None) -> List[Quote]:
@@ -614,23 +650,9 @@ def parse_product_page(html: Optional[str], url: str = "", *,
     if not html:
         return []
     data = payload(html)
-    wanted = symbol_from_url(url)
-    rich = _rich_records(data)
-    if not rich:
-        return []
-    chosen = None
-    if wanted:
-        for r in rich:
-            if _symbols_match(r[13], wanted):
-                chosen = r
-                break
+    chosen = _subject_record(data, symbol_from_url(url))
     if chosen is None:
-        # No url to match against (a caller handing in bare html), or the url
-        # named something the page does not carry. A page that named nothing
-        # is only safe to read when it holds exactly ONE rich record.
-        if wanted or len(rich) != 1:
-            return []
-        chosen = rich[0]
+        return []
     return [_row_from_rich(chosen, url=url or quote_url(chosen[13]),
                            market=market, page=page)]
 
@@ -657,6 +679,13 @@ MOVER_LISTS = ("gainers", "losers", "most_active")
 # The strips `--mode markets` reads, which are exactly the listings the
 # retired `/finance/markets/*` urls used to serve one per page.
 MARKET_STRIPS = ("index", "sector", "currency", "crypto", "futures")
+
+# Which page kind each mode reads. One definition, read by the engines'
+# argument validation, by page_flow's readiness map and by the suite — so a
+# new mode cannot be wired into one of them and forgotten in the others.
+QUOTE_PAGE_MODES = ("quote", "financials", "analysts", "chart")
+MARKET_PAGE_MODES = ("markets", "movers", "earnings")
+ALL_MODES = QUOTE_PAGE_MODES + MARKET_PAGE_MODES
 
 
 def _movers_labels_hold(sublists: Sequence[Sequence[Sequence[Any]]]) -> bool:
@@ -771,20 +800,48 @@ def parse_markets(html: Optional[str], url: str = "", *,
     data = payload(html)
     mover_ids = {id(r) for sub in _mover_sublists(data) for r in sub}
     sector_ids = _sector_record_ids(data)
-    rows: List[Quote] = []
-    seen: set = set()
+    # The indices strip is published TWICE under two keys, and the two
+    # copies are not byte-identical: they are the same instruments quoted
+    # seconds apart. Keeping "the first one walked" therefore made the
+    # output depend on walk order, which is how a trimmed fixture and the
+    # capture it came from ended up disagreeing about a price while
+    # reporting the same row count. Freshest wins, the same rule
+    # `_subject_record` applies on a quote page.
+    best: Dict[str, list] = {}
     for rec in _compact_records(data):
         if id(rec) in mover_ids:
             continue
         symbol = rec[21]
-        if symbol in seen:
-            continue
-        seen.add(symbol)
-        rows.append(_row_from_compact(rec, url=quote_url(symbol),
+        prev = best.get(symbol)
+        if prev is None or _record_stamp(rec) > _record_stamp(prev):
+            best[symbol] = rec
+    # Sorted by (strip, symbol) rather than left in payload order, and that
+    # is OUR order rather than Google's — said plainly because a reader will
+    # otherwise assume `position` reflects how the site ranks a strip.
+    #
+    # It cannot reflect that, because the site publishes its indices strip
+    # TWICE and the two copies walk in different orders depending on which
+    # blobs a document happens to carry. Left unsorted, the same 45 rows
+    # came out sectors-first from one blob subset and indices-first from
+    # another — same set, different `position` on every row, which is a diff
+    # every night for nothing. Movers are deliberately NOT sorted this way:
+    # their order within a list IS the ranking, and they arrive in one blob.
+    ordered = sorted(best.values(),
+                     key=lambda r: (MARKET_STRIPS.index(strip_of(r, sector_ids))
+                                    if strip_of(r, sector_ids) in MARKET_STRIPS
+                                    else len(MARKET_STRIPS), r[21]))
+    rows: List[Quote] = []
+    for rec in ordered:
+        rows.append(_row_from_compact(rec, url=quote_url(rec[21]),
                                       listing=strip_of(rec, sector_ids),
                                       market=market, page=1,
                                       position=len(rows) + 1))
     return rows
+
+
+def _record_stamp(rec: Sequence[Any]) -> str:
+    """A compact record's as-of time, as a sortable string ("" if absent)."""
+    return _epoch_iso(rec[11] if len(rec) > 11 else None) or ""
 
 
 def strip_of(rec: Sequence[Any], sector_ids: Optional[set] = None) -> str:
@@ -800,6 +857,440 @@ def strip_of(rec: Sequence[Any], sector_ids: Optional[set] = None) -> str:
     return kind
 
 
+# ---------------------------------------------------------------------------
+# Mode C: financials, analysts, earnings, chart
+# ---------------------------------------------------------------------------
+#
+# Everything below reads the SAME payload a quote page already carries — no
+# extra fetch, no click, no XHR. The four "tabs" the site renders (Overview,
+# Analysis, Earnings, Financials, Holdings) are rendered client-side out of
+# data that arrived in the first response.
+
+# Slot -> column for a reporting period's figure array. Seven of 106 slots,
+# and the other 99 are deliberately unexposed: see `output_writer.Financial`
+# for how these were established and why a plausible guess at the rest would
+# be worse than nothing.
+_FIN_SLOTS = {
+    "revenue": 0,
+    "net_income": 1,
+    "net_profit_margin": 3,
+    "eps": 9,
+    "ebitda": 20,
+    "effective_tax_rate": 21,
+    "operating_expense": 38,
+}
+# The two that a period which has not happened yet still carries.
+_FIN_ESTIMATE_SLOTS = {"revenue_estimate": 8, "eps_estimate": 10}
+_FIN_CURRENCY_SLOT = 16
+_FIN_PERIOD_END_SLOT = 17
+
+# The two array widths the site publishes. The 18-slot form is a strict
+# PREFIX of the 106-slot one — verified on Alphabet's 2024 Q2, where slot 0
+# is revenue, 9 is EPS and 16/17 are the currency and period end, exactly as
+# in a detailed quarter — so one slot map serves both and the narrow rows
+# simply have fewer columns filled.
+_FIN_WIDTHS = (18, 106)
+
+
+def _iso_date(v: Any) -> Optional[str]:
+    """`[2026, 6, 30]` -> `"2026-06-30"`."""
+    if (isinstance(v, list) and len(v) == 3
+            and all(isinstance(x, int) for x in v)):
+        y, m, d = v
+        if 1900 < y < 2200 and 1 <= m <= 12 and 1 <= d <= 31:
+            return "%04d-%02d-%02d" % (y, m, d)
+    return None
+
+
+def _period_nodes(data: Dict[str, Any]) -> List[list]:
+    """Every `[year, quarter, [figures...]]` a page carries.
+
+    Found by shape: a plausible year, a quarter in range, and a figure array
+    of one of the two published widths. Deduped by (year, quarter) keeping
+    the WIDER array, because a page can carry the same quarter twice — once
+    detailed and once in a summary strip — and the narrow copy would
+    otherwise shadow the detailed one depending on walk order.
+    """
+    best: Dict[tuple, list] = {}
+    for node in _walk(list(data.values())):
+        if (len(node) >= 3 and isinstance(node[0], int)
+                and 1990 < node[0] < 2200
+                and isinstance(node[1], int) and 1 <= node[1] <= 4
+                and isinstance(node[2], list) and len(node[2]) in _FIN_WIDTHS):
+            key = (node[0], node[1])
+            if key not in best or len(node[2]) > len(best[key][2]):
+                best[key] = node
+    return [best[k] for k in sorted(best, reverse=True)]
+
+
+def parse_financials(html: Optional[str], url: str = "", *,
+                     page: Optional[int] = None,
+                     market: Optional[str] = None) -> List[Any]:
+    """`--mode financials`: one row per reporting period.
+
+    Measured on the 2026-09-22 Alphabet capture: 90 periods, quarterly back
+    to 2004, of which the 8 most recent carry the full 106-figure array and
+    the rest carry the 18-figure summary. That split is reported in the
+    `detailed` column rather than smoothed over, so a consumer can tell a
+    summary period from a parsing failure.
+    """
+    from output_writer import Financial
+    if not html:
+        return []
+    data = payload(html)
+    subject = _subject_record(data, symbol_from_url(url))
+    if subject is None:
+        return []
+    symbol, name = subject[13], subject[14]
+
+    rows: List[Any] = []
+    for pos, node in enumerate(_period_nodes(data), 1):
+        figures = node[2]
+
+        def slot(i):
+            v = figures[i] if i < len(figures) else None
+            return _num(v)
+
+        row = Financial(
+            url=url or quote_url(symbol),
+            sku=symbol,
+            title=name,
+            fiscal_year=node[0],
+            fiscal_quarter=node[1],
+            period_end=_iso_date(figures[_FIN_PERIOD_END_SLOT]
+                                 if _FIN_PERIOD_END_SLOT < len(figures) else None),
+            currency=(figures[_FIN_CURRENCY_SLOT]
+                      if _FIN_CURRENCY_SLOT < len(figures)
+                      and isinstance(figures[_FIN_CURRENCY_SLOT], str) else None),
+            detailed=len(figures) == max(_FIN_WIDTHS),
+            page=page,
+            position=pos,
+        )
+        for field_name, idx in _FIN_SLOTS.items():
+            setattr(row, field_name, slot(idx))
+        for field_name, idx in _FIN_ESTIMATE_SLOTS.items():
+            setattr(row, field_name, slot(idx))
+        # A period with no figure at all is a structural match on noise, not
+        # a reporting period. Dropped rather than written as a row of nulls.
+        if any(getattr(row, f) is not None for f in _FIN_SLOTS):
+            rows.append(row)
+    return rows
+
+
+# The consensus header: [name, currency, low, high, mean, upside, total,
+# verdict, buy, SELL, HOLD, ...]. Slots 9 and 10 are the surprising pair —
+# see `output_writer.AnalystRating` for the live reading that settled them.
+_CONSENSUS_MIN = 11
+_BUY_VERDICTS = ("StrongBuy", "Buy")
+_SELL_VERDICTS = ("StrongSell", "Sell")
+
+
+def _consensus_record(data: Dict[str, Any]) -> Optional[list]:
+    for node in _walk(list(data.values())):
+        if (len(node) >= _CONSENSUS_MIN
+                and isinstance(node[0], str) and node[0]
+                and isinstance(node[1], str) and len(node[1]) == 3
+                and all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                        for x in node[2:7])
+                and isinstance(node[7], str) and node[7]
+                and all(isinstance(x, int) for x in node[8:11])):
+            return node
+    return None
+
+
+def rating_breakdown(rec: Sequence[Any]) -> Dict[str, Optional[int]]:
+    """Buy / hold / sell, or three Nones if the payload disagrees with itself.
+
+    The slot order here is counter-intuitive and was read off the rendered
+    page rather than assumed, so it is also CHECKED rather than trusted. Two
+    invariants, both cheap:
+
+      * the three counts must sum to the stated total;
+      * a buy-leaning verdict must not carry more sells than buys (and the
+        mirror for a sell-leaning one).
+
+    When either fails, the counts are nulled and the total kept. That is a
+    downgrade rather than a mislabel — the same answer this module gives
+    when the movers lists stop looking like gainers and losers — because a
+    swapped hold/sell pair is exactly the kind of error that reads as
+    plausible for years.
+    """
+    total = rec[6] if isinstance(rec[6], int) else None
+    buy, sell, hold = rec[8], rec[9], rec[10]
+    verdict = rec[7]
+    null = {"buy_count": None, "hold_count": None, "sell_count": None}
+    if total is None or buy + sell + hold != total:
+        return null
+    if verdict in _BUY_VERDICTS and sell > buy:
+        return null
+    if verdict in _SELL_VERDICTS and buy > sell:
+        return null
+    return {"buy_count": buy, "hold_count": hold, "sell_count": sell}
+
+
+# An analyst action: [id, analyst, firm, rating, "MM/DD/YYYY", url, image,
+# ...tipranks stats..., headline, byline, headline, target, ...].
+_ACTION_MIN = 20
+_ACTION_DATE_RE = re.compile(r"^(\d{2})/(\d{2})/(\d{4})$")
+
+
+def _action_records(data: Dict[str, Any]) -> List[list]:
+    out = []
+    for node in _walk(list(data.values())):
+        if (len(node) >= _ACTION_MIN
+                and isinstance(node[0], str) and len(node[0]) >= 16
+                and isinstance(node[1], str) and isinstance(node[2], str)
+                and isinstance(node[3], str)
+                and isinstance(node[4], str)
+                and _ACTION_DATE_RE.match(node[4])):
+            out.append(node)
+    return out
+
+
+def parse_analysts(html: Optional[str], url: str = "", *,
+                   page: Optional[int] = None,
+                   market: Optional[str] = None) -> List[Any]:
+    """`--mode analysts`: the consensus, and every published action.
+
+    One row per action with the consensus repeated on each — see
+    `output_writer.AnalystRating` for why denormalised. Where the site
+    publishes a consensus and no actions, one row carries the consensus
+    alone rather than nothing.
+    """
+    from output_writer import AnalystRating
+    if not html:
+        return []
+    data = payload(html)
+    subject = _subject_record(data, symbol_from_url(url))
+    if subject is None:
+        return []
+    symbol, name = subject[13], subject[14]
+
+    rec = _consensus_record(data)
+    common: Dict[str, Any] = {}
+    if rec is not None:
+        common = {
+            "consensus": rec[7],
+            "analysts_total": rec[6] if isinstance(rec[6], int) else None,
+            "target_low": _num(rec[2]),
+            "target_high": _num(rec[3]),
+            "target_mean": _num(rec[4]),
+            "target_upside_pct": _num(rec[5]),
+            "target_currency": rec[1],
+        }
+        common.update(rating_breakdown(rec))
+
+    rows: List[Any] = []
+    for pos, act in enumerate(_action_records(data), 1):
+        m = _ACTION_DATE_RE.match(act[4])
+        rows.append(AnalystRating(
+            url=url or quote_url(symbol), sku=symbol, title=name,
+            analyst=act[1] or None,
+            firm=act[2] or None,
+            action=act[3] or None,
+            action_date="%s-%s-%s" % (m.group(3), m.group(1), m.group(2)),
+            price_target=_num(_first_target(act)),
+            headline=_first_str_after(act, 16),
+            headline_url=act[5] if isinstance(act[5], str)
+            and act[5].startswith("http") else None,
+            page=page, position=pos, **common))
+    if not rows and common:
+        rows.append(AnalystRating(url=url or quote_url(symbol), sku=symbol,
+                                  title=name, page=page, position=1, **common))
+    return rows
+
+
+def _first_target(act: Sequence[Any]) -> Optional[float]:
+    """The price target in an action record.
+
+    Taken as the first number that sits immediately before the record's own
+    currency code, because the record repeats the target two or three times
+    with the currency after each — reading a fixed slot would work on the
+    capture it was written against and break on the next shape.
+    """
+    for i, v in enumerate(act):
+        if (isinstance(v, str) and len(v) == 3 and v.isupper()
+                and i >= 2 and isinstance(act[i - 2], (int, float))
+                and not isinstance(act[i - 2], bool)):
+            return act[i - 2]
+    return None
+
+
+def _first_str_after(act: Sequence[Any], start: int) -> Optional[str]:
+    for v in act[start:]:
+        if isinstance(v, str) and len(v) > 20 and " " in v:
+            return v
+    return None
+
+
+def parse_earnings(html: Optional[str], url: str = "", *,
+                   market: Optional[str] = None,
+                   page: Optional[int] = None) -> List[Any]:
+    """`--mode earnings`: the market page's upcoming announcements.
+
+    Read from the market page rather than a quote page, so this answers "who
+    reports this week" rather than "when does X report". 5 events on the
+    2026-09-22 gl=US capture. The calendar is geo-selected like every other
+    list on that page, so `market` is recorded on each row.
+    """
+    from output_writer import EarningsEvent
+    if not html:
+        return []
+    rows: List[Any] = []
+    for pos, node in enumerate(_earnings_nodes(payload(html)), 1):
+        ticker, exchange = node[0]
+        detail = node[3] if len(node) > 3 and isinstance(node[3], list) else []
+        figures = next((x for x in detail
+                        if isinstance(x, list) and len(x) in _FIN_WIDTHS), [])
+
+        def slot(i):
+            v = figures[i] if i < len(figures) else None
+            return _num(v)
+
+        rows.append(EarningsEvent(
+            url=quote_url("%s:%s" % (ticker, exchange)),
+            sku="%s:%s" % (ticker, exchange),
+            title=detail[2] if len(detail) > 2 and isinstance(detail[2], str) else None,
+            event_title=node[2],
+            event_date=_iso_date(node[1]),
+            event_at=_epoch_iso(next((x for x in detail
+                                      if isinstance(x, list) and len(x) == 1
+                                      and isinstance(x[0], int)
+                                      and x[0] > 1_000_000_000), None)),
+            fiscal_year=detail[3] if len(detail) > 3 and isinstance(detail[3], int) else None,
+            fiscal_quarter=detail[4] if len(detail) > 4 and isinstance(detail[4], int) else None,
+            period_end=_iso_date(figures[_FIN_PERIOD_END_SLOT]
+                                 if _FIN_PERIOD_END_SLOT < len(figures) else None),
+            currency=(figures[_FIN_CURRENCY_SLOT]
+                      if _FIN_CURRENCY_SLOT < len(figures)
+                      and isinstance(figures[_FIN_CURRENCY_SLOT], str) else None),
+            revenue_estimate=slot(_FIN_ESTIMATE_SLOTS["revenue_estimate"]),
+            eps_estimate=slot(_FIN_ESTIMATE_SLOTS["eps_estimate"]),
+            market=market, page=page, position=pos))
+    return rows
+
+
+def _earnings_nodes(data: Dict[str, Any]) -> List[list]:
+    out = []
+    for node in _walk(list(data.values())):
+        if (len(node) >= 3
+                and isinstance(node[0], list) and len(node[0]) == 2
+                and all(isinstance(x, str) and x for x in node[0])
+                and _iso_date(node[1])
+                and isinstance(node[2], str) and "Earnings" in node[2]):
+            out.append(node)
+    return out
+
+
+# An OHLCV bar: [open, close, high, low, "ISO timestamp", volume]. Close is
+# SECOND — verified against the quote record's own open/high/low/last on two
+# instruments rather than assumed; see `output_writer.ChartPoint`.
+_BAR_LEN = 6
+_BAR_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+
+
+def _is_bar(v: Any) -> bool:
+    return (isinstance(v, list) and len(v) == _BAR_LEN
+            and isinstance(v[4], str) and bool(_BAR_TS_RE.match(v[4]))
+            and all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                    for x in (v[0], v[1], v[2], v[3], v[5])))
+
+
+def _bar_series(data: Dict[str, Any]) -> List[Tuple[str, List[list]]]:
+    """Every contiguous OHLCV SERIES, labelled "5m" or "1d".
+
+    Labelled per SERIES rather than per bar, and that is a bug fix rather
+    than a refinement. The first version grouped bars by DATE and called a
+    date holding many bars intraday — right for every bar but one: the daily
+    bar for the CURRENT session carries the same timestamp as that session's
+    last five-minute bar (`2026-09-21T16:00:00-04:00` on the Alphabet
+    capture). Grouped by date it joined the intraday run and was labelled
+    "5m" while carrying the whole session's open, high, low and volume — a
+    full-day bar wearing a five-minute label.
+
+    It was found because the three engines stopped agreeing: two series
+    holding a bar with the same timestamp ordered differently under
+    different walk orders, so one engine put a different row at position 97.
+    That is the family's "all three engines must produce identical rows"
+    rule paying for itself — nothing about the output looked wrong on its
+    own.
+
+    A series is a list whose elements are ALL bars, which is how the payload
+    stores them. Its interval is the median gap between consecutive bars:
+    under a day is intraday, a day or more is daily. Derived from the data
+    rather than from which blob it arrived in, because blob identity is the
+    one thing this module refuses to depend on.
+    """
+    from datetime import datetime
+    out: List[Tuple[str, List[list]]] = []
+    seen: set = set()
+    for node in _walk(list(data.values())):
+        if len(node) < 2 or not all(_is_bar(x) for x in node):
+            continue
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        gaps = []
+        for a, b in zip(node, node[1:]):
+            try:
+                gaps.append(abs((datetime.fromisoformat(b[4])
+                                 - datetime.fromisoformat(a[4])).total_seconds()))
+            except ValueError:
+                continue
+        if not gaps:
+            continue
+        gaps.sort()
+        median = gaps[len(gaps) // 2]
+        out.append(("1d" if median >= 23 * 3600 else "5m", list(node)))
+    return out
+
+
+def parse_chart(html: Optional[str], url: str = "", *,
+                page: Optional[int] = None,
+                market: Optional[str] = None) -> List[Any]:
+    """`--mode chart`: every OHLCV bar the page already carries.
+
+    Both intervals, in one run, with no extra fetch: the latest session at
+    five-minute resolution and about a month of daily bars. Measured on the
+    2026-09-22 Alphabet capture: 99 bars, of which 79 are intraday (one
+    full 09:30-16:00 session) and 20 daily.
+
+    `--window` does not deepen this — every value from 5D to MAX returned
+    the same daily series, because the deeper history is fetched
+    client-side. That is stated here and in the README rather than left for
+    a reader to discover as a broken flag.
+    """
+    from output_writer import ChartPoint
+    if not html:
+        return []
+    data = payload(html)
+    subject = _subject_record(data, symbol_from_url(url))
+    if subject is None:
+        return []
+    symbol, name = subject[13], subject[14]
+    currency = subject[12] if isinstance(subject[12], str) else None
+
+    rows: List[Any] = []
+    pos = 0
+    # Sorted so a run's output is stable whatever order the payload happened
+    # to walk in. Two series can hold a bar with the SAME timestamp — the
+    # current session's daily bar and its last intraday bar — so sorting on
+    # the timestamp alone is not enough, and an unstable order here is
+    # exactly what made the mislabelling above visible.
+    for interval, series in sorted(_bar_series(data),
+                                   key=lambda s: (s[0], s[1][0][4])):
+        for b in series:
+            pos += 1
+            rows.append(ChartPoint(
+                url=url or quote_url(symbol), sku=symbol, title=name,
+                interval=interval, ts=b[4],
+                open=_num(b[0]), close=_num(b[1]),
+                high=_num(b[2]), low=_num(b[3]),
+                volume=int(b[5]) if isinstance(b[5], (int, float)) else None,
+                currency=currency, page=page, position=pos))
+    return rows
+
+
 def parse_products(html: Optional[str], url: str = "", page: Optional[int] = None,
                    *, mode: str = "quote", market: Optional[str] = None,
                    **_ignored: Any) -> List[Quote]:
@@ -808,6 +1299,14 @@ def parse_products(html: Optional[str], url: str = "", page: Optional[int] = Non
         return parse_markets(html, url, market=market)
     if mode == "movers":
         return parse_movers(html, url, market=market)
+    if mode == "financials":
+        return parse_financials(html, url, page=page, market=market)
+    if mode == "analysts":
+        return parse_analysts(html, url, page=page, market=market)
+    if mode == "earnings":
+        return parse_earnings(html, url, market=market, page=page)
+    if mode == "chart":
+        return parse_chart(html, url, page=page, market=market)
     return parse_product_page(html, url, market=market, page=page)
 
 
