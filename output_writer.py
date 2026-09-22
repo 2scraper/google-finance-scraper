@@ -545,12 +545,6 @@ def dedupe_by_key(rows: Sequence[Any], seen: Set[Any],
     return fresh
 
 
-# Kept under its old name: the engines and smoke tests in this family all
-# call it, and a listing run does dedupe by sku.
-def dedupe_by_sku(rows: Sequence[Any], seen: Set[str]) -> List[Any]:
-    return dedupe_by_key(rows, seen, key="sku")
-
-
 # CSV cannot hold a list. Joining with " | " keeps the cell readable in a
 # spreadsheet and round-trippable by splitting on the same separator; the
 # JSON output keeps the real list, so nothing is lost for a consumer that

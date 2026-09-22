@@ -1609,6 +1609,105 @@ def test_ci_checks_is_wired_up():
     return ok
 
 
+def test_diff_runs_can_match_mode_c():
+    group("diff_runs matches the mode it is given")
+    ok = True
+    import diff_runs
+    # `sku` alone identifies a row only where a row IS an instrument. It is
+    # not in four of the seven modes: a financials run has ninety rows
+    # sharing one sku. Matching those on sku reported "0 added, 0 removed,
+    # 0 changed" alongside "178 rows could not be matched" — a diff of
+    # nothing presented as a clean result, which is worse than a refusal.
+    # Found by running the tool end to end in a fresh clone, not by reading.
+    fin = [dataclasses.asdict(r) for r in _rows("financials_us")]
+    ok &= check("the fixture really has many rows under one sku",
+                len(fin) > 20 and len({r["sku"] for r in fin}) == 1)
+    indexed, unmatchable = diff_runs._by_sku(fin, "financials")
+    ok &= check("every financials row indexes distinctly",
+                len(indexed) == len(fin) and unmatchable == 0)
+    sku_only, sku_unmatchable = diff_runs._by_sku(fin, "quote")
+    ok &= check("...and would collapse to one row under a sku-only key",
+                len(sku_only) == 1 and sku_unmatchable == len(fin) - 1)
+
+    for mode, name in (("analysts", "analysts_us"), ("chart", "chart_us"),
+                       ("earnings", "earnings_us"), ("movers", "movers_us")):
+        rows = [dataclasses.asdict(r) for r in _rows(name)]
+        idx, un = diff_runs._by_sku(rows, mode)
+        ok &= check("%s rows all index distinctly" % mode,
+                    len(idx) == len(rows) and un == 0)
+
+    # A run diffed against itself must report no change in every mode.
+    for mode, name in (("financials", "financials_us"),
+                       ("chart", "chart_us"), ("analysts", "analysts_us")):
+        rows = [dataclasses.asdict(r) for r in _rows(name)]
+        res = diff_runs.diff_products(rows, list(rows), mode=mode)
+        ok &= check("%s: a run against itself is unchanged" % mode,
+                    not res["added"] and not res["removed"]
+                    and not res.get("changed"))
+    return ok
+
+
+def test_many_currencies_in_one_run_is_normal_here():
+    group("the currency guard fits THIS site")
+    ok = True
+    # Inherited from a sibling with ONE currency per run, where a second is
+    # proof the run was redirected mid-way. That premise is false here, and
+    # the check was actively misleading because of it: a real `--mode
+    # markets` run produced "holds more than one currency (['CAD','JPY',
+    # 'USD']) — that run was redirected mid-way", a false alarm with a false
+    # explanation. The market page publishes FX, crypto, futures and indices
+    # side by side.
+    rows = _rows("markets_us")
+    seen = {r.currency for r in rows if r.currency}
+    ok &= check("one markets run legitimately holds several currencies (%s)"
+                % sorted(seen), len(seen) > 1)
+    # Asserted by CALLING the refusal, not by grepping the source for a
+    # phrase — the first version of this check forbade "redirected mid-way"
+    # and then failed on the fix's own comment explaining what that used to
+    # say. A note about a banned phrase is a use of it.
+    import diff_runs, tempfile as _tf, json as _json, io as _io
+    from contextlib import redirect_stdout as _rs
+
+    def refuses(old_rows, new_rows, mode="markets"):
+        with _tf.TemporaryDirectory() as d:
+            paths = {}
+            for label, rows in (("old", old_rows), ("new", new_rows)):
+                p = os.path.join(d, label + ".json")
+                _json.dump(rows, open(p, "w"))
+                _json.dump({"status": "complete", "mode": mode, "market": "US",
+                            "pages_completed": 1, "pages_requested": 1,
+                            "stop_reason": "completed"},
+                           open(p.replace(".json", ".meta.json"), "w"))
+                paths[label] = p
+
+            class A:
+                pass
+            a = A()
+            a.old, a.new, a.force = paths["old"], paths["new"], False
+            buf = _io.StringIO()
+            with _rs(buf):
+                allowed = diff_runs._check_comparable(a)
+            return not allowed, buf.getvalue()
+
+    many = [dataclasses.asdict(r) for r in _rows("markets_us")]
+    refused, why = refuses(many, list(many))
+    ok &= check("a multi-currency markets run is NOT refused%s"
+                % ("" if not refused else ": " + why.strip()[:90]), not refused)
+
+    # But an instrument whose currency changed between runs IS caught: that
+    # means one run read a different venue and its prices are meaningless.
+    moved = [dict(r) for r in many]
+    for r in moved:
+        if r.get("currency") == "USD":
+            r["currency"] = "EUR"
+            break
+    refused2, why2 = refuses(many, moved)
+    ok &= check("an instrument that changed currency IS refused", refused2)
+    ok &= check("...and the reason names the change",
+                "changed currency" in why2)
+    return ok
+
+
 def test_no_public_function_without_a_consumer():
     group("no public function nobody calls")
     ok = True
@@ -1829,6 +1928,8 @@ def main() -> int:
     ok &= test_dockerfile_copies_what_it_imports()
     ok &= test_sample_output_matches_the_schema()
     ok &= test_ci_checks_is_wired_up()
+    ok &= test_diff_runs_can_match_mode_c()
+    ok &= test_many_currencies_in_one_run_is_normal_here()
     ok &= test_no_public_function_without_a_consumer()
     ok &= test_canary_is_coherent()
     ok &= test_engines(skips)

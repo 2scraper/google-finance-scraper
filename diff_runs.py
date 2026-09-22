@@ -79,8 +79,12 @@ TRACKED_FIELDS = ("price", "original_price", "discount_pct", "currency",
 # it. So diffing a listing run against a product run would otherwise report
 # a discount appearing on every product in the file, and not one of those
 # would be a price change.
-PRICE_FIELDS = ("price", "original_price", "discount_pct", "price_max",
-                "subscription_price")
+# What a diff reports a change in, across all five row classes. A field
+# absent from a row class is simply never compared, so one tuple serves all
+# of them.
+PRICE_FIELDS = ("price", "prev_close", "change", "change_pct",
+                "target_mean", "target_low", "target_high",
+                "revenue", "net_income", "eps", "close")
 
 
 def _load(path: str) -> List[dict]:
@@ -88,22 +92,49 @@ def _load(path: str) -> List[dict]:
         return json.load(f)
 
 
-def _by_sku(products: List[dict]) -> Tuple[Dict[str, dict], int]:
-    indexed = {}
+def _row_key(row: dict, mode: Optional[str]) -> Optional[tuple]:
+    """What identifies a row across two runs, for `mode`.
+
+    `sku` alone only works where a row IS an instrument. It is not: a
+    financials run has ninety rows sharing one sku, an analysts run has
+    forty-four, and a chart run has ninety-nine. Matching those on sku
+    reported "0 added, 0 removed, 0 changed" and "178 rows could not be
+    matched" — a diff of nothing, presented as a clean result, which is
+    worse than a refusal.
+
+    The key is `output_writer.DEDUPE_KEY_BY_MODE`, which is the same
+    definition the writers dedupe on, so a row that survived dedupe is
+    exactly a row this can match.
+    """
+    fields = DEDUPE_KEY_BY_MODE.get(mode or "", "sku")
+    if isinstance(fields, str):
+        fields = (fields,)
+    values = tuple(row.get(f) for f in fields)
+    return None if all(v is None for v in values) else values
+
+
+def _by_sku(products: List[dict],
+            mode: Optional[str] = None) -> Tuple[Dict[tuple, dict], int]:
+    """Index a run's rows by whatever identifies them in `mode`.
+
+    Kept under its old name: every repo in this family calls it, and the
+    thing it does — index a run so two runs can be matched — has not
+    changed.
+    """
+    indexed: Dict[tuple, dict] = {}
     unmatchable = 0
     for p in products:
-        sku = p.get("sku")
-        if sku is None:
+        key = _row_key(p, mode)
+        if key is None:
             unmatchable += 1
             continue
-        # A run's own output can already hold a duplicate sku (two rows in the
-        # same category, or a rerun of dedupe_by_sku's job on older output
-        # written before it existed) — keep the first and count the rest as
-        # unmatchable rather than letting one clobber the other silently.
-        if sku in indexed:
+        # A run's own output can already hold a duplicate key — keep the
+        # first and count the rest as unmatchable rather than letting one
+        # clobber the other silently.
+        if key in indexed:
             unmatchable += 1
             continue
-        indexed[sku] = p
+        indexed[key] = p
     return indexed, unmatchable
 
 
@@ -114,11 +145,16 @@ def _within_tolerance(before: dict, after: dict, changes: dict,
     Inherited from this family rather than earned here, and said plainly
     because the alternative is a comment inventing a reason. A sibling repo
     needs it: that site converts prices for a cross-border visitor and the
-    exchange rate ticks between two runs of the same command. NO EQUIVALENT
-    THIS SITE'S BEHAVIOUR WAS MEASURED, and it makes this flag doubly
-    unnecessary here: the site prices everything in JPY for every visitor,
-    so a run holds no conversion drift to absorb, AND the yen has no
-    subunit, so every price is a whole number with no rounding tick either.
+    exchange rate ticks between two runs of the same command.
+
+    THIS SITE IS THE OPPOSITE CASE, and the flag is more useful here than
+    in any sibling rather than less. A quote MOVES: two runs of `--mode
+    markets` four minutes apart, measured 2026-09-22, differed on crypto
+    and FX rows by fractions of a percent — BTC 86279.23 -> 86210.33,
+    EUR-USD 1.14501632 -> 1.14502 — because the market is open and prices
+    are supposed to move. That is not drift to absorb, it is the data; a
+    price monitor that wants only material moves is exactly who should set
+    this.
 
     So the flag stays available and DEFAULTS TO ZERO, which makes it inert
     unless someone deliberately asks for it. Set it to something non-zero
@@ -145,9 +181,14 @@ def _within_tolerance(before: dict, after: dict, changes: dict,
 
 
 def diff_products(old: List[dict], new: List[dict],
-                  price_tolerance_pct: float = 0.0) -> dict:
-    old_by_sku, old_unmatchable = _by_sku(old)
-    new_by_sku, new_unmatchable = _by_sku(new)
+                  price_tolerance_pct: float = 0.0,
+                  mode: Optional[str] = None) -> dict:
+    # `mode` decides what identifies a row. Defaulting to None keeps the
+    # family's signature working for a caller that has no sidecar, and
+    # falls back to `sku` — which is right for the only mode where a row IS
+    # an instrument.
+    old_by_sku, old_unmatchable = _by_sku(old, mode)
+    new_by_sku, new_unmatchable = _by_sku(new, mode)
 
     added = [new_by_sku[sku] for sku in new_by_sku.keys() - old_by_sku.keys()]
     removed = [old_by_sku[sku] for sku in old_by_sku.keys() - new_by_sku.keys()]
@@ -335,45 +376,45 @@ def _check_comparable(args) -> bool:
             f"added and removed. Compare a market against itself, or pass "
             f"--force if you know what you are asking for.")
 
-    # A CURRENCY MISMATCH, which on this site should be impossible — and is
-    # checked anyway.
+    # A CURRENCY CHANGE UNDER ONE INSTRUMENT.
     #
-    # The sibling repos guard cross-storefront diffs with `source`: eleven
-    # country hostnames, so a run of one against another is refused on the
-    # hostname alone. Google Finance is ONE marketplace with ONE currency —
-    # `?lang=` changes the chrome and nothing else, and the payload states no
-    # currency at all while the page's structured data says JPY on both
-    # routes, measured 2026-09-21 — so `source` is "google.com/finance" on both
-    # sides and there is no storefront split for it to catch.
+    # The sibling this was inherited from has ONE currency per run and
+    # treats a second as proof the run was redirected mid-way. That premise
+    # is false here and the check was actively misleading because of it: a
+    # single `--mode markets` run legitimately holds USD, EUR, JPY, GBP and
+    # more at once, because the market page publishes FX pairs, crypto,
+    # futures and indices side by side. Running the real tool on a real
+    # markets run produced "holds more than one currency (['CAD','JPY',
+    # 'USD']) — that run was redirected mid-way", which is a false alarm
+    # with a false explanation attached.
     #
-    # This check is therefore expected never to fire, and it is kept for one
-    # reason: if it EVER does, it means either the site has grown a second
-    # currency or something in this repo is inventing them, and both of those
-    # make every row's price incomparable. A guard that costs nothing and
-    # fails loudly beats discovering it from a diff.
-    currencies = {}
+    # What IS worth catching is an instrument whose currency changed between
+    # two runs: GOOGL quoted in USD yesterday and EUR today means one of the
+    # two runs read the wrong venue, and every price comparison for that row
+    # is meaningless. So the check is per-sku, across the two runs, rather
+    # than per-run.
+    by_sku = {}
     for label, path in (("--old", args.old), ("--new", args.new)):
         try:
             rows = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        seen = {r.get("currency") for r in rows if r.get("currency")}
-        if len(seen) == 1:
-            currencies[label] = seen.pop()
-        elif len(seen) > 1:
-            problems.append(
-                f"{label} ({path}) holds more than one currency ({sorted(seen)}) "
-                f"— that run was redirected mid-way and its own prices are not "
-                f"comparable with each other, let alone with another run's.")
-    if len(set(currencies.values())) > 1:
+        for r in rows:
+            sku, cur = r.get("sku"), r.get("currency")
+            if sku and cur:
+                by_sku.setdefault(sku, {})[label] = cur
+    moved = {s: v for s, v in by_sku.items()
+             if len(v) == 2 and v["--old"] != v["--new"]}
+    if moved:
+        sample = ", ".join("%s %s->%s" % (s, v["--old"], v["--new"])
+                           for s, v in list(moved.items())[:3])
         problems.append(
-            f"the two runs quote different currencies ({currencies}). "
-            f"Google Finance prices everything in JPY for every visitor — "
-            f"measured on both routes and under both `?lang=` values — so "
-            f"this should be impossible: either the site has grown a second "
-            f"currency or one of these runs invented one, and either way "
-            f"every row's price is incomparable. `source` cannot catch it: "
-            f"it is 'google.com/finance' on both sides.")
+            f"{len(moved)} instrument(s) changed currency between the two "
+            f"runs ({sample}). An instrument does not change the currency "
+            f"its venue quotes in, so one of these runs read a different "
+            f"venue and every price comparison for those rows is "
+            f"meaningless. `source` cannot catch it: it is "
+            f"'google.com/finance' on both sides.")
 
     if not problems:
         return True
@@ -432,7 +473,12 @@ def main() -> int:
         print(f"[!] Could not read one of the input files: {e}")
         return 2
 
-    result = diff_products(old, new, price_tolerance_pct=args.price_tolerance_pct)
+    # The mode comes from the sidecar rather than a flag: it is what the
+    # run itself recorded, so a caller cannot tell the differ the wrong one.
+    _status, _meta = _run_status(args.new)
+    mode = (_meta or {}).get("mode")
+    result = diff_products(old, new, price_tolerance_pct=args.price_tolerance_pct,
+                           mode=mode)
     _print_summary(result)
 
     if args.out:
