@@ -1,0 +1,155 @@
+name: Bug report
+description: The scraper ran but the result was wrong, empty, or it crashed.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before anything else: never paste an API key, a proxy password or a
+        full `ws://user:pass@...` endpoint into a public issue.** The scrapers
+        mask credentials in their own logs, but raw HTML dumps and the Scraper
+        API's `x-debug` header do not. Replace them with `***`.
+
+        A few things answer most reports faster than we can:
+
+        - **Everything exit 3?** Check the CLIENT before you check the
+          address. The listing routes on this site need no proxy and no key
+          — measured 2026-09-21, one datacentre IP was served 45 products a
+          page by plain curl AND by headless Chromium, and refused with a
+          43-byte deny only when a curl handshake claimed a Chrome
+          User-Agent. So look for a user agent or fingerprint that disagrees
+          with the TLS handshake under it. See
+          [TROUBLESHOOTING.md](../blob/main/TROUBLESHOOTING.md).
+        - **Exit 3 only after page 1?** That is the shape a fingerprint
+          problem takes here: nav 1 served, navs 2 onward denied. Test any UA
+          or `--fingerprint` change over two pages.
+        - **HTTP 503 and アクセスが集中しております?** That is Google Finance's own
+          rate-limit page, not a block. Raise `--delay` or lower
+          `--concurrency`.
+        - **`price` null on some rows?** Worth this issue: `price` was
+          populated on 405 of 405 measured rows. Say which URL and attach the
+          `--dump-html` output.
+        - **`original_price` or `discount_pct` null?** Expected on the
+          listing route — the payload publishes no was-price at all. Use
+          `--mode product`, which reads Google Finance's verified reference price.
+        - **`in_stock` True on every row?** Expected: the search excludes
+          sold-out products rather than marking them.
+        - **`rating` and `review_count` empty on some rows?** Expected:
+          nobody has reviewed that product. Google Finance writes that as
+          `{score: 0, numReviews: 0}` and both columns are nulled together.
+        - **`currency` null on later pages?** The site states the currency in
+          a JSON-LD block it publishes on page 1 only, and the run carries it
+          forward. A null means that block moved — worth this issue.
+        - **Zero rows?** You may be on a route that has none: the mall front
+          page carries campaign rails and no grid; a merchant storefront
+          (`www.google.com/finance/{shop}/`) carries an EMPTY payload; and
+          `ranking.google.com/finance` is a different application this repo does
+          not read. Those are exit 4 and correct answers.
+        - **A page collected twice?** Worth this issue. Google Finance re-serves
+          page 1 under HTTP 200 past the end of a listing, and the run is
+          supposed to detect that from the offset the server states.
+        - **The run stopped short of the catalogue?** That is the site's own
+          cap, and it is severe here: Google Finance serves at most 6,750 results
+          per query (150 pages of 45) however many it matched. One measured
+          query reported 3,053,682 matches against that same 6,750. The run
+          reports both numbers in its sidecar. Narrow the query with the
+          site's own filters — genre, price band, shop, tag — and run each
+          slice.
+        - **Wrong language?** The language is a path segment (`/ar/`), not
+          something the exit IP decides. Prices are AED for every visitor.
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Which engine
+      options:
+        - playwright_scraper.py
+        - puppeteer_scraper.py
+        - selenium_scraper.py
+        - scraper_api_client.py
+        - fingerprint_client.py
+        - other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: browser_route
+    attributes:
+      label: How was the browser reached
+      options:
+        - A browser the script launched itself
+        - A remote browser over --cdp-endpoint
+        - No browser (scraper_api_client.py over plain HTTP)
+        - Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: exit_code
+    attributes:
+      label: Exit code
+      description: >-
+        `echo $?` straight after the run. These mean specific things — 3 is a
+        challenge page, 4 is "ran fine, found nothing", 124 is a self-imposed
+        timeout. The table is in the README.
+      placeholder: "4"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command
+      description: With credentials replaced by `***`.
+      render: shell
+      placeholder: |
+        python3 playwright_scraper.py \
+          --url "https://search.google.com/finance/search/mall/-/100356/" \
+          --pages 3 --out coffee
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: >-
+        The whole run, not just the last line — the useful detail is usually
+        upstream of the error. Credentials replaced by `***`.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      placeholder: >-
+        96 products, as the README says a category page yields.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Please run and paste:
+        ```
+        python3 -c "import sys, platform; print(sys.version, platform.platform())"
+        pip list 2>/dev/null | grep -Ei "playwright|pyppeteer|selenium|beautifulsoup4|requests|webdriver"
+        python3 smoke_test.py | tail -3
+        ```
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: The offline suite passes on my machine (`python3 smoke_test.py`)
+          required: true
+        - label: I removed every API key, password and credentialled URL from this report
+          required: true

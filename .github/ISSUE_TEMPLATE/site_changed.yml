@@ -1,0 +1,89 @@
+name: Site changed / selectors broke
+description: Google Finance changed something and the parser no longer matches.
+labels: ["site-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most common way a scraper stops working, and it is worth
+        its own report because the fix is different from a code bug:
+        something on google.com/finance moved.
+
+        Useful to know before filing, because it narrows the fix a lot — this
+        parser reads **two different sources for two halves of a row**:
+
+        - **The rows** come from the site's own SSR payload,
+          `<script id="__NEXT_DATA__">`, which is in the first response and
+          needs no JavaScript. Titles, ids, urls, images, prices, locations
+          and every Google Finance-specific column come from there — so if those are
+          empty, the Redux action the grid lives in
+          (`listings/fetchListingDataForQuery/fulfilled`) has moved. If
+          instead `brand`, `seller_name` or `in_stock` are empty while
+          everything else is fine, it is the page's JSON-LD ItemList or the
+          path-keyed join to it, not the payload.
+          not carry it: bids arrive at hydration.
+
+        So "no rows at all" and "rows with no prices" are two different
+        breakages with two different fixes, and `price_source` on the rows
+        tells you which happened: `next_data+dom` is healthy, `next_data`
+        means nothing hydrated.
+
+  - type: dropdown
+    id: what_broke
+    attributes:
+      label: What stopped matching
+      options:
+        - No rows at all on a page that visibly has lots (the payload moved)
+        - Rows come out with no prices (the card, or its price class, moved)
+        - brand / seller_name / in_stock empty (the JSON-LD join moved)
+        - A null price with no reserve_price_set flag (the invariant broke)
+        - favorite_count empty on every row (the card's counter moved)
+        - Pagination stops early, repeats a page, or runs past the 100 cap
+        - One route returns nothing while the others are fine (search vs genre vs item)
+        - The Arabic pages lost brand / seller_name / in_stock
+        - A no-results search returns 24 suggested lots as if they were real
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: URL
+      description: >-
+        The exact URL, its locale prefix, and how the browser was reached.
+        Please say whether the run was headful or over --cdp-endpoint: a
+        headless run is refused by the site and is not a parser problem.
+      placeholder: "https://search.google.com/finance/search/mall/-/100356/ (--mode listing, headless Chromium, no proxy, datacentre exit)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence from the page
+      description: |
+        Whichever of these you can get. A capture beats a description, and
+        `--dump-html` writes one on success as well as on failure.
+
+        - The payload as the page actually serves it:
+          `python3 -c "import json,re;h=open('dump.html').read();d=json.loads(re.search(r'id=.__NEXT_DATA__.[^>]*>(.*?)</script>',h,1).group(1));print(sorted(d['props']['pageProps']))"`
+        - For a price problem: one whole tile from devtools — the
+          `div.lpv-cards` that wraps the ad — and the amount the page
+          shows for it. The price is split across two sibling nodes
+          here (`AED` in one, the digits in
+          `[data-testid="listing-price"]`), so both are needed.
+        - For a missing-column problem: which route and --mode, and whether the
+          page has a JSON-LD ItemList at all
+          ("Current bid", "Aktuelles Gebot", ...) and the locale.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it reproduces on a second engine, whether it reproduces in a
+        second locale, and when it last worked.
