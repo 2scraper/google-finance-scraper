@@ -43,7 +43,8 @@ Same address, same url, one fetch each:
 
 `Sec-Fetch-Dest/Mode/Site` make no difference — tested with and without, both
 follow the User-Agent. So on this site a browser User-Agent is REQUIRED,
-where rakuten-scraper's site refuses curl precisely FOR wearing one. Neither
+where a sibling site in this family refuses curl precisely FOR wearing
+one. Neither
 is a general rule; the axis is what to measure, not the direction.
 
 WHAT IS NOT HERE, AND WHY
@@ -193,33 +194,6 @@ ASSET_HOST_MARKERS = ("gstatic.com/finance", "www.gstatic.com/_/finance")
 
 _AF_CALL_RE = re.compile(r"AF_initDataCallback\((\{.*?\});?\)\s*;", re.S)
 _AF_KEY_RE = re.compile(r"key:\s*'([^']+)'")
-
-
-def decode_page(body: Any, headers: Optional[Dict[str, str]] = None) -> str:
-    """Return `body` as text, honouring a declared charset.
-
-    A browser engine hands this module a `str` and this is a no-op. An HTTP
-    client hands it `bytes`, and a blind `.decode("utf-8")` is how a sibling
-    turned a whole column into replacement characters while the numbers
-    still parsed. Google Finance serves UTF-8 on every capture taken, so
-    there is no charset quirk to work around here — the function exists so
-    that an engine cannot be the place where one is discovered.
-    """
-    if isinstance(body, str):
-        return body
-    if body is None:
-        return ""
-    charset = None
-    ctype = (headers or {}).get("content-type") or (headers or {}).get("Content-Type") or ""
-    m = re.search(r"charset=([\w-]+)", ctype, re.I)
-    if m:
-        charset = m.group(1)
-    if not charset:
-        head = bytes(body[:2048])
-        m = re.search(br'charset=["\']?([\w-]+)', head, re.I)
-        if m:
-            charset = m.group(1).decode("ascii", "replace")
-    return bytes(body).decode(charset or "utf-8", "replace")
 
 
 def iter_payload_blobs(html: Optional[str]) -> Iterator[Tuple[str, Any]]:
@@ -499,15 +473,6 @@ def instrument_type(compact: Sequence[Any]) -> str:
 # exact list missed: `ESW00:CME_EMINIS` and `NQW00:CME_EMINIS` were
 # labelled "stock" until this was measured.
 _FUTURES_VENUES = ("COMEX", "NYMEX", "CBOT", "CME", "ICE")
-
-
-def symbol_of(record: Sequence[Any]) -> Optional[str]:
-    """The canonical `TICKER:EXCHANGE` (or `BASE-QUOTE`) of either record."""
-    if _is_rich(record):
-        return record[13]
-    if _is_compact(record):
-        return record[21]
-    return None
 
 
 # --------------------------------------------------------------------------

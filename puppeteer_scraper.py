@@ -845,7 +845,29 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         return outcome
 
 
-    if state == "content":
+    # Through the POLICY, not against a literal. `STATE_POLICY` is the
+    # one place that says which states are worth reading, and an engine
+    # comparing against "content" by hand is an engine that can quietly
+    # disagree with its twins and with the table — which is the whole
+    # reason page_flow exists (CLAUDE.md §1). Found by checking which
+    # public functions had no consumer: `should_parse` had none, while
+    # its three siblings were all wired.
+    if state == "not_found":
+        # Named rather than left as a generic empty page. `STATE_POLICY`
+        # says the caller's symbol list is what is wrong and that this is
+        # worth telling them — a promise the engines were not keeping, so a
+        # run of ten symbols with three typos reported seven rows and no
+        # hint which three. The colon form of a pair is the trap this exists
+        # for, because it returns HTTP 200 with the ticker echoed back.
+        logger.warning(
+            "Google has no instrument called %s — it served its own Page "
+            "Not Found. This is an ANSWER, not a block: retrying or "
+            "rotating an exit gets the same one. Venue-traded instruments "
+            "are TICKER:EXCHANGE (GOOGL:NASDAQ); currency and crypto pairs "
+            "are BASE-QUOTE (EUR-USD, BTC-USD).",
+            symbol_from_url(url) or url)
+
+    if page_flow.should_parse(state):
         # Wait for the prices to fill in. There is NO scroll: three scrolls
         # to the document's own bottom added zero cards on every page kind.
         # What the wait is for is hydration — the server sends 24 card shells

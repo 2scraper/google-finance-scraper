@@ -1609,6 +1609,74 @@ def test_ci_checks_is_wired_up():
     return ok
 
 
+def test_no_public_function_without_a_consumer():
+    group("no public function nobody calls")
+    ok = True
+    # CLAUDE.md §17: a policy constant nothing reads is the same defect as
+    # dead code, and harder to see because the prose reads like enforcement.
+    # The same is true of a FUNCTION, and this repo had three:
+    #
+    #   page_flow.pagination_agrees   documented, returned True, called by
+    #   page_flow.pages_at_cap        nothing at all
+    #   product_parser.decode_page    a charset guard with no caller, so the
+    #                                 class of bug it describes was unguarded
+    #
+    # And one worse than dead — `should_parse` existed, was correct, and had
+    # no consumer while all three engines compared `state == "content"` by
+    # hand. The STATE_POLICY table's `parse` column decided nothing, so an
+    # engine could silently disagree with the table and with its twins.
+    #
+    # Consumers are counted ANYWHERE, including the defining module, because
+    # `parse_products` routing to `parse_financials` is a real consumer even
+    # though nothing outside product_parser.py names it.
+    import io as _io
+    sources = {}
+    for path in glob.glob(os.path.join(REPO_ROOT, "*.py")) + \
+            glob.glob(os.path.join(REPO_ROOT, ".github", "*.py")):
+        sources[os.path.basename(path)] = open(path, encoding="utf-8").read()
+    ok &= check("there are modules to scan", len(sources) >= 10)
+
+    # Entry points and dunder-ish names are consumed by a shell, not by a
+    # caller. Everything else must be named somewhere other than its own
+    # `def` line.
+    ENTRY_POINTS = {"main", "build", "scrape", "parse_args"}
+    dead = []
+    for mod in ("page_flow.py", "product_parser.py", "output_writer.py"):
+        src = sources.get(mod)
+        if not src:
+            continue
+        tree = ast.parse(src, mod)
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            name = node.name
+            if name.startswith("_") or name in ENTRY_POINTS:
+                continue
+            uses = 0
+            for fname, text in sources.items():
+                for m in re.finditer(r"\b%s\b" % re.escape(name), text):
+                    line_start = text.rfind("\n", 0, m.start()) + 1
+                    line = text[line_start:text.find("\n", m.start())]
+                    if line.lstrip().startswith("def %s" % name):
+                        continue
+                    uses += 1
+            if uses == 0:
+                dead.append("%s.%s" % (mod[:-3], name))
+    ok &= check("every public function has a consumer%s"
+                % ("" if not dead else " (%s)" % dead), not dead)
+
+    # And the state policy must be READ rather than reimplemented: an engine
+    # comparing a state name by hand is how the table stops deciding
+    # anything.
+    for eng in ENGINES:
+        src = sources.get(eng + ".py")
+        if not src:
+            continue
+        ok &= check("%s reads the parse decision from the policy" % eng,
+                    "page_flow.should_parse(" in src)
+    return ok
+
+
 def test_canary_is_coherent():
     group("the canary tests what it claims to")
     ok = True
@@ -1761,6 +1829,7 @@ def main() -> int:
     ok &= test_dockerfile_copies_what_it_imports()
     ok &= test_sample_output_matches_the_schema()
     ok &= test_ci_checks_is_wired_up()
+    ok &= test_no_public_function_without_a_consumer()
     ok &= test_canary_is_coherent()
     ok &= test_engines(skips)
     ok &= test_concurrency_machinery(skips)

@@ -537,20 +537,11 @@ def comparable(url: str) -> str:
     return canonical_url(url)
 
 
-def pagination_agrees(current_url: str, page_num: int,
-                      next_href: Union[str, Iterable[str], None] = None) -> bool:
-    return True
-
-
 def next_page_candidates(current_url: str,
                          next_href: Union[str, Iterable[str], None] = None,
                          page_num: int = 1) -> List[str]:
     """Empty, always. There is no next page on this site."""
     return []
-
-
-def pages_at_cap(html: Optional[str]) -> bool:
-    return True
 
 
 def cap_summary(html: Optional[str], url: str = "") -> Dict[str, Optional[object]]:
