@@ -83,8 +83,8 @@ from urllib.parse import urljoin, urlparse, urlunparse
 from product_parser import (PAGE_CAP, canonical_url, capped_by_site,
                             detect_block_marker, detect_bot_challenge,
                             detect_page_state, is_not_found,
-                            is_unsupported_client, listing_kind,
-                            market_from_url, market_metadata,
+                            is_unsupported_client,
+                            market_from_url,
                             no_pagination_reason, pages_beyond_cap,
                             paginates_by_url, reachable_max, served_by_google,
                             symbol_from_url, total_pages, total_results,
@@ -499,35 +499,6 @@ def next_page_selector(page_num: int = 1) -> str:
     return NEXT_PAGE_SELECTOR
 
 
-def requested_page_number(url: str, loop_index: int = 1) -> int:
-    """Which page the FETCHED url asks for. Always 1 here.
-
-    A sibling's version of this compared the loop counter against the served
-    page and threw away 45 good rows on a run that started at `?p=2`. There
-    is no such parameter on this site, so the comparison is trivially true —
-    and it is kept, rather than removed, so that an engine's page loop reads
-    the same here as in its siblings.
-    """
-    return 1
-
-
-def served_page_number(html: Optional[str] = None,
-                       url: str = "") -> Optional[int]:
-    return 1
-
-
-def served_the_page_asked_for(html: Optional[str], asked_for: int = 1,
-                              url: str = "") -> bool:
-    """Did the site serve the page we asked for?
-
-    Always True, because there is only ever one page. This is the check two
-    siblings needed because their sites re-served page 1 for an
-    out-of-range request under HTTP 200; it cannot fire here and is kept
-    honest rather than deleted, so the engines' loop is identical.
-    """
-    return True
-
-
 def pagination_is_addressable(url: str = "", html: Optional[str] = None) -> bool:
     return paginates_by_url(url, html)
 
@@ -542,28 +513,6 @@ def next_page_candidates(current_url: str,
                          page_num: int = 1) -> List[str]:
     """Empty, always. There is no next page on this site."""
     return []
-
-
-def cap_summary(html: Optional[str], url: str = "") -> Dict[str, Optional[object]]:
-    """What the sidecar records about the shape of this read.
-
-    `capped_by_site` is True and `reachable_max` is 1 on every url here, and
-    that is not the sibling's meaning of the words. There it meant "the site
-    will serve you 15 of 1,268 pages and calling that complete is a lie by
-    omission". Here it means the opposite: one page IS everything the site
-    publishes for this url, so a one-page run is exhaustive rather than a
-    sample. `market` is what a consumer actually needs to know, because the
-    root page's lists are geo-selected and two markets are two samples.
-    """
-    summary: Dict[str, Optional[object]] = {
-        "total_results": total_results(html, mode=listing_kind(url)) if html else None,
-        "pages_available": 1,
-        "capped_by_site": True,
-        "reachable_max": 1,
-        "paginates": False,
-    }
-    summary.update(market_metadata(html, url))
-    return summary
 
 
 def concurrency_limit(url: str = "") -> Optional[int]:

@@ -15,22 +15,22 @@
 # real captures, verified to parse identically to them and scrubbed;
 # it has to be IN the repo or the suite cannot run on a clean clone.
 !fixtures_generated.json
-dubizzle_listings.*
-dubizzle_listings_*.*
+google_finance.*
+google_finance_*.*
 
 # --- the live-test harness's working directory ---------------------------
 # `--dump-html PATH` writes PATH.page1, PATH.page2, ... — FILES, not a
 # directory. Ignoring only `live_results/` let two 1.5 MB page dumps be
-# committed by a merge; each carried 26 per-seller UUIDs, 12 copies of the
-# site's Algolia key and its Sentry keys, none of which belongs here. Both
+# committed by a merge in dubizzle-scraper; each carried 26 per-seller
+# UUIDs, 12 copies of that site's Algolia key and its Sentry keys. Both
 # spellings are ignored now, and the offline suite asserts that no raw
 # capture is tracked.
 live_results/
 live_results.*
 # ANY working directory a live run writes into, not just the one name this
 # family's older repos used. `live/sel_dump.html` — a 1.5 MB raw page dump —
-# was staged by `git add -A` on this repo's very first commit because only
-# `live_results/` was listed here. The lesson is the same one a sibling
+# was staged by `git add -A` on rakuten-scraper's very first commit because only
+# `live_results/` was listed there. The lesson is the same one a sibling
 # already paid for, arriving through a directory nobody had listed, so the
 # pattern is now the KIND of directory rather than one chosen name.
 live/

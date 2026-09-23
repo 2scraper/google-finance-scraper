@@ -55,7 +55,8 @@ Not because these do not matter, but because they belong somewhere else:
 
 - **Bypassing Google Finance's bot protection.** This scraper drives an ordinary
   browser and passes challenges the way a browser does. Anything about how
-  Akamai or reCAPTCHA behave is not a vulnerability in this repository.
+  Google's `/sorry/index` interstitial or reCAPTCHA behave is not a
+  vulnerability in this repository.
 - **The scraper stopped working.** Google Finance changing its markup is expected —
   file it as a normal issue, there is a template for exactly that.
 - **Anything about 2Captcha's services** — the solver API, the Scraping Browser

@@ -1644,6 +1644,30 @@ def test_diff_runs_can_match_mode_c():
         ok &= check("%s: a run against itself is unchanged" % mode,
                     not res["added"] and not res["removed"]
                     and not res.get("changed"))
+
+    # ...and a real move IS reported, in every row class. TRACKED_FIELDS was
+    # a retail sibling's list (points, shipping_fee, in_stock, ...) with only
+    # `price` and `currency` in common with any row here, so a revenue, a
+    # close or a change_pct that moved diffed as "0 changed". Each case
+    # below moves ONE value on a real fixture row and nothing else.
+    for mode, name, fld in (("financials", "financials_us", "revenue"),
+                            ("financials", "financials_us", "eps"),
+                            ("chart", "chart_us", "close"),
+                            ("analysts", "analysts_us", "target_mean"),
+                            ("markets", "markets_us", "change_pct")):
+        rows = [dataclasses.asdict(r) for r in _rows(name)]
+        base = next((r for r in rows if isinstance(r.get(fld), (int, float))),
+                    None)
+        ok &= check("%s fixture carries a numeric %s" % (name, fld),
+                    base is not None)
+        if base is None:
+            continue
+        moved = [dict(r) for r in rows]
+        target = moved[rows.index(base)]
+        target[fld] = base[fld] * 1.5 + 1
+        res = diff_runs.diff_products(rows, moved, mode=mode)
+        ok &= check("%s: a moved %s is reported as ONE change" % (mode, fld),
+                    len(res.get("changed") or []) == 1)
     return ok
 
 

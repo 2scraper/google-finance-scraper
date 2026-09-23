@@ -12,51 +12,21 @@ body:
 
         A few things answer most reports faster than we can:
 
-        - **Everything exit 3?** Check the CLIENT before you check the
-          address. The listing routes on this site need no proxy and no key
-          — measured 2026-09-21, one datacentre IP was served 45 products a
-          page by plain curl AND by headless Chromium, and refused with a
-          43-byte deny only when a curl handshake claimed a Chrome
-          User-Agent. So look for a user agent or fingerprint that disagrees
-          with the TLS handshake under it. See
+        - **Zero rows and `unsupported_client` in the sidecar?** Not a
+          block. Google Finance redirects a client whose User-Agent does not
+          look like a browser to `/finance/beta/unsupported`; something
+          overrode the engine's browser User-Agent. See
           [TROUBLESHOOTING.md](../blob/main/TROUBLESHOOTING.md).
-        - **Exit 3 only after page 1?** That is the shape a fingerprint
-          problem takes here: nav 1 served, navs 2 onward denied. Test any UA
-          or `--fingerprint` change over two pages.
-        - **HTTP 503 and アクセスが集中しております?** That is Google Finance's own
-          rate-limit page, not a block. Raise `--delay` or lower
-          `--concurrency`.
-        - **`price` null on some rows?** Worth this issue: `price` was
-          populated on 405 of 405 measured rows. Say which URL and attach the
-          `--dump-html` output.
-        - **`original_price` or `discount_pct` null?** Expected on the
-          listing route — the payload publishes no was-price at all. Use
-          `--mode product`, which reads Google Finance's verified reference price.
-        - **`in_stock` True on every row?** Expected: the search excludes
-          sold-out products rather than marking them.
-        - **`rating` and `review_count` empty on some rows?** Expected:
-          nobody has reviewed that product. Google Finance writes that as
-          `{score: 0, numReviews: 0}` and both columns are nulled together.
-        - **`currency` null on later pages?** The site states the currency in
-          a JSON-LD block it publishes on page 1 only, and the run carries it
-          forward. A null means that block moved — worth this issue.
-        - **Zero rows?** You may be on a route that has none: the mall front
-          page carries campaign rails and no grid; a merchant storefront
-          (`www.google.com/finance/{shop}/`) carries an EMPTY payload; and
-          `ranking.google.com/finance` is a different application this repo does
-          not read. Those are exit 4 and correct answers.
-        - **A page collected twice?** Worth this issue. Google Finance re-serves
-          page 1 under HTTP 200 past the end of a listing, and the run is
-          supposed to detect that from the offset the server states.
-        - **The run stopped short of the catalogue?** That is the site's own
-          cap, and it is severe here: Google Finance serves at most 6,750 results
-          per query (150 pages of 45) however many it matched. One measured
-          query reported 3,053,682 matches against that same 6,750. The run
-          reports both numbers in its sidecar. Narrow the query with the
-          site's own filters — genre, price band, shop, tag — and run each
-          slice.
-        - **Wrong language?** The language is a path segment (`/ar/`), not
-          something the exit IP decides. Prices are AED for every visitor.
+        - **`not_found`?** An answer, not a failure: Google has no such
+          instrument. Pairs are `EUR-USD`, not `EURUSD:CURRENCY`.
+        - **`movers` has only a few rows per list?** Expected: Google
+          publishes the top 1 to 4 of each list, not a full ranking.
+        - **`eps` null on some instruments?** Expected where Google
+          publishes none in that slot (0 of 88 periods on `7203:TYO`).
+        - **`--pages 3` refused?** Expected: the site does not paginate.
+          Use `--symbols` to read more instruments.
+        - **Different rows from someone else's run?** The market page's
+          lists are geo-selected. Pass `--market` and say which.
 
   - type: dropdown
     id: engine
@@ -89,9 +59,9 @@ body:
     attributes:
       label: Exit code
       description: >-
-        `echo $?` straight after the run. These mean specific things — 3 is a
-        challenge page, 4 is "ran fine, found nothing", 124 is a self-imposed
-        timeout. The table is in the README.
+        `echo $?` straight after the run. These mean specific things — 3 is
+        blocked, 4 is "ran fine, found nothing", 5 is "the content was never
+        obtained". The table is in the README.
       placeholder: "4"
     validations:
       required: true
@@ -104,8 +74,7 @@ body:
       render: shell
       placeholder: |
         python3 playwright_scraper.py \
-          --url "https://search.google.com/finance/search/mall/-/100356/" \
-          --pages 3 --out coffee
+          --mode quote --symbols GOOGL:NASDAQ,EUR-USD --out quotes
     validations:
       required: true
 
@@ -125,7 +94,7 @@ body:
     attributes:
       label: What you expected instead
       placeholder: >-
-        96 products, as the README says a category page yields.
+        46 rows, as the README says `--mode markets --market US` yields.
     validations:
       required: true
 

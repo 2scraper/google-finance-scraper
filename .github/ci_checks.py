@@ -82,18 +82,12 @@ HEX32 = re.compile(r"\b[0-9a-f]{32}\b")
 
 # EMPTY, DELIBERATELY, and the reason is worth more than the tuple.
 #
-# Google Finance publishes a 32-hex identifier of its own — the cross-merchant
-# catalogue id in `productUrl`
-# (`product.google.com/finance/product/-/55b617dc…/`) — so this repo had the same
-# choice a sibling faced: subtract that shape from the scan, or keep the scan
-# strict and take the id out of the fixtures.
-#
-# It keeps the scan strict. Nothing in this schema reads `productUrl`, so
-# `make_fixtures.py` replaces the id with a placeholder and there is no
-# 32-hex string left in the working tree at all. That is the stronger
-# arrangement: an allowlist forgiving 32-hex inside a google.com/finance URL is a
-# hole a real key could later hide in, and the only thing it buys is keeping
-# a field nobody uses.
+# rakuten-scraper, whose site publishes a 32-hex catalogue id of its own,
+# faced the choice of subtracting that shape from the scan or taking the id
+# out of the fixtures, and took the id out. This repo has nothing to
+# subtract: `make_fixtures.py` redacts every 32-hex string a capture holds
+# (its SECRET_PATTERNS), so there is no 32-hex string left in the working
+# tree at all.
 #
 # So a bare 32-hex string ANYWHERE in this repository fails, with no
 # exceptions to reason about. If a future capture needs one, add it here with
@@ -128,34 +122,15 @@ def _without_site_ids(line):
 HEX32_ALLOWED = ("sha", "hash", "nonce", "example", "md5", "digest",
                  "checksum")
 
-# Files the BARE-HEX rule is not applied to, and the reason it is not.
+# Files the BARE-HEX rule is not applied to. EMPTY, and that is the stricter
+# arrangement rather than an omission.
 #
-# These are verbatim site markup and verbatim run output. This site emits
-# 32-hex identifiers in at least five public contexts — the tail of an ad
-# URL, the `uuid` field, a photo filename, the `location_list.uuids` array,
-# and its own front-end keys — so a bare-hex rule over them produces
-# hundreds of findings that are all correct data. A check that cries wolf 221
-# times is a check somebody switches off, and then it protects nothing.
-#
-# What covers them instead is STRONGER, not weaker, because it looks for the
-# shape of a secret rather than the shape of a hex string:
-#
-#   * every rule below still applies here — a credentialled URL and a
-#     key-shaped field both fail in these files;
-#   * `make_fixtures.py` refuses to write a fixture whose scrub left an
-#     agent's name, a per-seller UUID or a key-shaped value in it;
-#   * `smoke_test.py` re-scans the whole committed fixture corpus for JWTs,
-#     access tokens, API keys, Sentry DSNs, session ids, emails and proxy
-#     credentials, and FAILS if the corpus it scanned was empty.
-# EMPTY, and that is the stricter arrangement rather than an omission.
-#
-# A sibling repo exempts its generated data files from the bare-hex rule,
-# because its site publishes a 32-hex identifier in five contexts and a rule
+# dubizzle-scraper exempts its generated data files from the bare-hex rule,
+# because its site publishes 32-hex identifiers in five contexts and a rule
 # that fires 221 times on correct data is a rule somebody switches off. This
-# repo does not need the exemption: `make_fixtures.py` replaces Google Finance's own
-# 32-hex catalogue id with a placeholder, so there is no 32-hex string in the
-# fixtures or the sample output at all, and the bare-hex rule therefore
-# covers them like every other tracked file.
+# repo does not need the exemption: `make_fixtures.py` redacts every 32-hex
+# string, so there is none in the fixtures or the sample output, and the
+# bare-hex rule covers them like every other tracked file.
 #
 # Keeping this empty means the files most likely to acquire a pasted
 # credential — the big generated ones nobody reads line by line — are the
@@ -237,8 +212,9 @@ SCANNED_SUFFIXES = (".py", ".md", ".txt", ".yml", ".yaml", ".example")
 #
 # A suffix allowlist is a scanner that cannot see the thing most likely to
 # leak. `--dump-html live_results` writes `live_results.page1` — no suffix
-# the list knew — and a merge committed two of them, 1.5 MB each, carrying 26
-# per-seller UUIDs, 12 copies of the site's Algolia key and its Sentry keys.
+# the list knew — and a merge in dubizzle-scraper committed two of them,
+# 1.5 MB each, carrying 26 per-seller UUIDs, 12 copies of that site's
+# Algolia key and its Sentry keys.
 # The check that exists to stop exactly that ran, passed, and never opened
 # them.
 #
@@ -259,7 +235,7 @@ CAPTURE_SHAPES = (
     # called. The four rules above all key on a NAME someone chose — a
     # `--dump-html` default, a debug suffix, one particular directory — and
     # that is exactly how a 1.5 MB page dump nearly reached the first commit
-    # of this repository: it sat in `live/`, which no pattern here listed and
+    # of rakuten-scraper: it sat in `live/`, which no pattern there listed and
     # `.gitignore` did not cover either, and `git add -A` staged it while
     # this check reported nothing.
     #

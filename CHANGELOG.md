@@ -10,6 +10,45 @@ release notes lead with it.
 
 ## [Unreleased]
 
+> **`diff_runs.py` now reports changes it used to miss.** Its tracked-field
+> list was a retail sibling's (was-price, discount, points, shipping fee,
+> stock flag) and only `price` and `currency` of it exist on any row here,
+> so a financials run whose revenue or EPS moved, a chart run whose close
+> moved, and a quote whose `change_pct` moved all diffed as "0 changed". If
+> you run `--fail-on-change`, expect it to fire where it stayed quiet before.
+
+### Fixed
+
+- **`diff_runs.py` tracks this site's value columns** — `TRACKED_FIELDS` is
+  now `PRICE_FIELDS` plus `currency` (price, prev_close, change, change_pct,
+  target_mean/low/high, revenue, net_income, eps, close). A new check moves
+  one value on a real fixture row per row class and requires exactly one
+  reported change; it fails against the old list.
+- **Log text that described another site.** The "blocked" error in all three
+  engines explained a 43-byte Akamai deny, a 45-product page and a Japanese
+  exit; the throttle warning quoted a Japanese rate-limit page; `--headful`
+  help described a ranking route; the Scraper API client's description said
+  these pages need scrolling. All now say what this repo measured, and the
+  blocked error prints `page_flow.block_advice`, which does.
+- **Unreachable listing-mode code removed from the three engines.** Four
+  `args.mode == "listing"` blocks per engine (pagination offset, result cap,
+  price-floor and thin-page checks) could never run, since `listing` is not
+  a mode here, and carried another site's measurements. The orphaned
+  `PageOutcome` fields, the `PRICE_FLOOR` / `THIN_PAGE_SHARE` constants and
+  the stubs that only they called (`page_flow.requested_page_number`,
+  `served_page_number`, `served_the_page_asked_for`, `cap_summary`,
+  `product_parser.search_header`) went with them. No reachable behaviour
+  changed.
+- **Donor prose rewritten or removed** in the engines, `output_writer.py`,
+  `diff_runs.py`, `scraper_api_client.py`, `captcha_solver.py`,
+  `fingerprint_client.py`, `.github/ci_checks.py`, `SECURITY.md`,
+  `CONTRIBUTING.md` and both site issue templates. Lessons that came from a
+  sibling now name the sibling.
+- **`.gitignore` / `.dockerignore` ignored another repo's output**
+  (`dubizzle_listings.*`). They now ignore this repo's default `--out`
+  prefix, `google_finance.*`.
+- **README badges**: added the release badge, in the family order.
+
 ## [0.2.0] — 2026-09-22
 
 Four more modes, all reading the SAME first response the quote modes already
