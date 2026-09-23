@@ -9,12 +9,10 @@ sign-in, checkout, anything) — this is deliberate, not scoped to any one
 page. If Google Finance renders a reCAPTCHA challenge anywhere — account, sign-in
 and checkout flows are the usual places — this fires.
 
-**NO captcha of any kind is configured anywhere on this site.** Measured
-2026-09-21 across 13 captures, served and refused alike: zero reCAPTCHA,
-hCaptcha, Turnstile, DataDome, PerimeterX, Incapsula, Kasada or AWS WAF
-markers, no challenge iframe, no `data-sitekey`, no `*_SITE_KEY` in any page
-config and no `<captcha-*>` mount point. And what Akamai refuses a request
-with here is a 43-byte page carrying nothing to solve.
+**No captcha was rendered in testing.** Every candidate marker scored zero
+across this repo's 11 captures, served and refused alike (README,
+"Captchas"). Google does serve `/sorry/index` with a reCAPTCHA to addresses
+it scores badly; that is the challenge this module exists for.
 
 So this module is a contingency, not part of the happy path — a bot manager
 can be switched on between deploys, and a scraper that cannot name what
@@ -37,8 +35,6 @@ NARROW: `--solve-captcha when-blocked` is the default and counts product
 links before paying, `page_flow.SOLVES_PER_PAGE` caps a page at one
 purchase, and `page_flow.STATE_POLICY` — not this file — decides which state
 is worth money at all.
-
-There is deliberately no DataDome path here. See "No DataDome solver" below.
 
 Flow:
   1. Both detectors run and are reconciled (see reconcile_detections) to decide
@@ -725,16 +721,12 @@ solve_recaptcha_v3 = solve_recaptcha
 # a JPEG of distorted text and a GET form). Roughly 190 lines of it, and none
 # of it is ported here, because this site has no such page.
 #
-# What this site does instead is refuse a HEADLESS browser. Measured
-# 2026-09-10 from five different addresses, four of them residential: Akamai
-# answers with HTTP 403 and a 394-byte "Access Denied" page carrying a
-# reference id — no form, no image, no widget, nothing for a solver to
-# answer. And the trigger is the CLIENT rather than the address: the very
-# same addresses were served HTTP 200 and the full catalogue by a browser
-# with a real window. So the response to a block here is `--headful` or
-# `--cdp-endpoint`, not a solve and not a better proxy, and
-# product_parser.detect_page_state reports it as "blocked" rather than
-# "challenge" precisely so no solve is attempted and nothing is charged.
+# What this site does instead, measured in this repo, is redirect a client
+# whose User-Agent does not look like a browser to
+# `/finance/beta/unsupported` — no form, no widget, nothing for a solver to
+# answer. product_parser.detect_page_state reports that as
+# "unsupported_client" rather than "challenge" precisely so no solve is
+# attempted and nothing is charged.
 #
 # The reCAPTCHA / hCaptcha / Turnstile machinery above IS kept, and that is a
 # deliberate asymmetry rather than an inconsistency. Detection stays broad
@@ -742,6 +734,6 @@ solve_recaptcha_v3 = solve_recaptcha
 # what the address has been doing — a narrow list is how a challenge gets
 # reported as an empty page months later. A solver for a challenge this site
 # has never been observed to serve is dead code; a DETECTOR for one is cheap
-# insurance: a detection that fires on a page whose lots have
+# insurance: a detection that fires on a page whose instruments have
 # already rendered guards nothing, which is why the default is
-# `when-blocked` and why it counts lot links before it spends.
+# `when-blocked` and why it counts instrument links before it spends.

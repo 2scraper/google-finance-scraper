@@ -3,39 +3,20 @@ output_writer.py
 -----------------
 Shared row models + JSON/CSV writers used by all three scrapers.
 
-Two modes, one row shape
-------------------------
-    --mode listing   a keyword search or a genre listing -> Product
-    --mode product   one item.google.com/finance/{shop}/{code}/ page -> Product,
-                     with the detail-only fields populated
+Seven modes, five row classes
+-----------------------------
+    --mode quote / markets / movers   -> Quote (alias Product)
+    --mode financials                 -> Financial
+    --mode analysts                   -> AnalystRating
+    --mode chart                      -> ChartPoint
+    --mode earnings                   -> EarningsEvent
 
-Both modes yield the SAME class, and on this site that is load-bearing
-rather than tidy. Google Finance states a product's identity as
-`{shopCode}:{manageNumber}` — the detail page publishes it as
-`<meta itemprop="sku">` and it is recoverable from the URL on both routes —
-so a listing row and a product row for the same product carry a
-byte-identical `sku` and a consumer can JOIN the two files on it. Verified
-live: a product run of `sawaicoffee-tea:solandluna` and a genre listing run
-that happened to contain it agreed on the id exactly.
-
-What that does NOT buy is a cross-mode DIFF, and `diff_runs.py` still
-refuses one (`--force` overrides). The ids line up; the row SETS do not. A
-90-row listing run against a 1-row product run would report 89 products
-removed, and every line of it would be an artefact of the two runs covering
-different things. Same reasoning as the family's refusal to diff a partial
-run: the join key being right is necessary and not sufficient.
-
-There is deliberately no `--mode shop`. A merchant's storefront at
-`www.google.com/finance/{shopCode}/` looks like it should be a third mode and is
-not: its `__INITIAL_STATE__.state.data` is EMPTY and it carries no
-`the payload` payload at all (measured 2026-09-21), so the mode would need
-a second parser written against markup nobody has captured. A mode that
-ships untested is worse than a mode that is absent — `product_parser`
-refuses that URL with that reason instead.
-
-`Product` keeps the family's first eighteen columns in the family's order,
-with Google Finance's own ones appended after `position`, so a consumer written
-against another repo in this family still reads the prefix unchanged.
+`ROW_CLASS_BY_MODE` below is the one mapping. Every class keeps the
+family prefix — `source`, `scraped_at`, `url`, `sku`, `title` — byte-
+identical and in order, and `sku` always means the instrument
+(`GOOGL:NASDAQ`, `EUR-USD`), so a consumer can JOIN a financials file to a
+quote file on it. What that does NOT buy is a cross-mode DIFF, and
+`diff_runs.py` refuses one: the rows are different kinds of thing.
 
 Everything below is row-class-agnostic: pass `row_cls` so an empty CSV still
 gets the right header for the mode that produced it.
@@ -48,13 +29,10 @@ from datetime import datetime, timezone
 from typing import Optional, List, Set, Sequence, Any, Type, Union
 
 
-# The hostname a row came from. Google Finance is ONE marketplace reached
-# through several hostnames — `search.google.com/finance` for the result grid,
-# `www.google.com/finance` for a genre landing page, `item.google.com/finance` for an
-# individual product — and they serve one catalogue in one currency. So this
-# column is `google.com/finance` on every row of every run rather than the
-# hostname of the moment; which route a row came from is recorded by
-# `price_source`, and the merchant behind it by `shop_code`.
+# The site a row came from. `google.com/finance` on every row of every run
+# rather than the hostname or path of the moment: the site redirects every
+# older `/finance/...` spelling to `/finance/beta/...`, and a run that
+# recorded the path would disagree with itself about which site it read.
 #
 # It is kept in this position because the family's schema has it here and
 # consumers read the columns by name across repos.
@@ -471,10 +449,8 @@ class ChartPoint:
 Product = Quote
 
 
-# One kind of thing, one dataclass. All three modes read the same object —
-# an instrument quote — differing only in how many of them a page holds and
-# how richly each is described, so there is no second row class to keep in
-# step.
+# The row class per mode. The three instrument-list modes read the same
+# object — an instrument quote — and the other four each read their own.
 ROW_CLASS_BY_MODE = {
     "quote": Quote, "markets": Quote, "movers": Quote,
     "financials": Financial, "analysts": AnalystRating,
@@ -688,21 +664,16 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
       failed   — nothing was gathered at all
 
     `mode` and `source` are recorded because `mode` is not implied by the
-    repo: the same output prefix can hold a listing run or a product run,
-    and those populate different columns — `sold` is a FLOOR on a listing
-    row and exact on a product row, so diffing one against the other would
-    report every row as changed. diff_runs.py refuses a pair whose modes or
-    sources differ. `source` is `google.com/finance` on every row of every run
-    here, since the site has one storefront and one currency; it is kept
-    because consumers read these columns by name across the family.
+    repo: the same output prefix can hold a quote run or a financials run,
+    and those are different row classes. diff_runs.py refuses a pair whose
+    modes or sources differ. `source` is `google.com/finance` on every row
+    of every run here; it is kept because consumers read these columns by
+    name across the family.
 
     `extra` carries facts about the run that are not about any single row.
-    `--mode shop` uses it for the SELLER's own name, location, rating and
-    review count: a run covers exactly one shop, so those belong to the run
-    rather than repeated down a column, and the shop's review count (16679
-    on the captured seller) is a different number from its listings' own
-    (827 on one of them) — putting them in one column would make the schema
-    lie.
+    Here that is the `market` the run read (the root page's lists are
+    geo-selected, so two markets are two samples), the language, and
+    whether the url paginates.
 
     `pages_failed` lists the pages that did not yield data, by number.
     `pages_completed` alone was enough only while pages were fetched strictly
@@ -726,7 +697,7 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
     }
     if extra:
         # Merged rather than nested under a key, so a consumer reads
-        # `shop_rating` at the top level beside `products`. Run fields win a
+        # `market` at the top level beside `products`. Run fields win a
         # name collision: a caller cannot accidentally overwrite `status`.
         meta.update({k: v for k, v in extra.items() if k not in meta})
     return meta
@@ -773,22 +744,13 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
 # the DATA (a page contributed nothing not already seen, so the listing is
 # over), while the second is a property of a CSS SELECTOR and is therefore
 # the weaker signal — a renamed attribute looks identical to a short
-# catalogue. On this site that ordering is not a preference, it is the only
-# thing that works: the site publishes NO `link[rel=next]` and no numbered
-# anchors anywhere, a CATEGORY listing is addressable by `?page=N`, and a
-# SEARCH is not addressable at all — `?page=2` there returns an empty result
-# set rather than page 2. So "no new products" is the one termination
-# condition available on a search. See page_flow.pagination_is_addressable.
+# catalogue. Neither fires on this site, which does not paginate at all
+# (README, "There is no pagination, anywhere"); they are kept because the
+# engines' page loop is the family's.
 #
-# "single_page_mode" is complete by construction: --mode product reads one
-# page because one page is all there is.
-# `end_of_listing` is a COMPLETE result and leaving it out of this tuple is a
-# bug worth naming, because it produced exit 6 for a correct run. On this
-# site a listing does not end with an error or an empty page: Google Finance answers
-# a request past the last page by serving page 1 again under HTTP 200, and
-# the engine detects that from the offset the server states rather than from
-# its own request. Having found the real end of the results, the run has
-# everything the site will give it.
+# "single_page_mode" is complete by construction, and `end_of_listing` is
+# complete too: leaving it out produced exit 6 for a correct run in
+# rakuten-scraper, where a listing past its last page re-serves page 1.
 COMPLETE_STOP_REASONS = ("completed", "pagination_exhausted", "no_new_products",
                          "single_page_mode", "end_of_listing")
 

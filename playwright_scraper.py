@@ -85,15 +85,11 @@ from captcha_solver import (detect_recaptcha_v3, detect_recaptcha_in_page,
                             CaptchaUnsolvable, INJECT_TOKEN_JS,
                             RECAPTCHA_DISCOVERY_JS)
 from product_parser import (parse_products, parse_product_page,
-                            currency_from_page,
                             pages_beyond_cap as parser_pages_beyond_cap,
-                            PAGE_CAP as parser_page_cap,
                             SELECTORS, LOCALES,
                             detect_bot_challenge, detect_block_marker,
                             page_url, paginates_by_url, listing_kind,
-                            capped_by_site, reachable_max,
-                            site_host, is_supported_host, total_results,
-                            total_pages, search_header, unsupported_reason,
+                            site_host, is_supported_host, unsupported_reason,
                             market_metadata, CURRENCY, served_by_google,
                             quote_url, markets_url, with_market,
                             canonical_url, symbol_from_url,
@@ -149,32 +145,6 @@ class PageOutcome:
     # can tell an EMPTY page — a query that matched nothing — from a page
     # that failed. Both produce zero rows and they mean opposite things.
     state: Optional[str] = None
-    # What the query itself says it matched — `pagination.numFound`. A
-    # LIVING number: three fetches of one query inside a minute gave
-    # 3,053,682, 3,053,713 and 3,053,712. Recorded as the site's answer at
-    # this moment, never asserted against.
-    total_available: Optional[int] = None
-    # The page's own declared language (`state.metadata.lang`), verbatim,
-    # for the sidecar. `?lang=en` changes the payload's `locale` to "en"
-    # while `lang` stays "ja" — so this is the honest record of what the
-    # site actually served, and it is why the README says the locale flag
-    # translates the chrome and not the data.
-    header: Optional[str] = None
-    # the site's own arithmetic about the query: total_results,
-    # pages_available, reachable_max, capped_by_site, pages_beyond_cap. In
-    # the sidecar because on this site "complete" and "exhaustive" are wildly
-    # different words and a status alone would be lying by omission (§21).
-    cap: Optional[dict] = None
-    # Whether the SERVER served the page we asked for, read off
-    # `pagination.start` rather than trusted from the request. False means
-    # the end of the listing: page 151 of a 150-page query answers 301 to
-    # page 1 and then HTTP 200 with 45 real products, and a `/category/` URL
-    # answers page 1 for any `?p=` at all. Both look like success.
-    served_requested_page: bool = True
-    # In --mode product, the merchant's own facts read off the item page.
-    # Stored as the small dict rather than by keeping the page's HTML around:
-    # a detail page is 244 KB in the browser.
-    shop_facts: Optional[dict] = None
 
     @property
     def ok(self) -> bool:
@@ -182,27 +152,6 @@ class PageOutcome:
 
 
 ITEM_LINK_SELECTOR = page_flow.READY_SELECTOR_LISTING
-
-# A price-coverage floor. One number, not a per-section map, because on
-# this site there is one answer: Google Finance names an instrument on every row, and a
-# price. Measured across 405 rows on 11 listing pages — keyword searches and
-# genre listings, pages 1 through 150 — `price` was non-null on 405 of 405.
-#
-# So the floor is high on purpose. A run that comes back with 80% priced has
-# not met an unusual page; it has a broken read, and the warning should say
-# so rather than shrug.
-#
-# `product` mode is not in the map: one page is one row, and a share of one
-# row is not a measurement.
-PRICE_FLOOR = {"listing": 95}
-
-# A page holding less than this share of the fullest page in the same run is
-# reported as thin. This site's page size is steady — 45 products on 11 of
-# 11 captures, and the LAST page of a capped query is 45 too (page 150 came
-# back `start: 6705`, exactly 6750 - 45) — so the bar can sit closer than it
-# does on some sibling repos. Not tight, though: the last page of a query
-# with fewer than 6,750 total hits is legitimately short.
-THIN_PAGE_SHARE = 0.6
 
 
 # ---------------------------------------------------------------------------
@@ -226,13 +175,11 @@ def _driver(page):
     }
 
 
-# No scroll primitives and no `page_height` here, and that is measured
-# rather than omitted: the same URL fetched by plain HTTP with no JavaScript
-# at all and by headless Chromium parsed to 45 rows each, with identical skus
-# and prices. Every listing page holds its whole page of products in the
-# first response and paginates by URL. A sibling repo cannot see a single
-# product without the scroll, which is exactly why this was checked here
-# instead of ported (see page_flow's docstring).
+# No scroll primitives and no `page_height` here. Google Finance renders
+# its whole payload into `AF_initDataCallback` blobs in the FIRST response,
+# so an HTTP client with a browser User-Agent and headless Chromium parse to
+# the same rows (README, "How it reads the page") and there is nothing for a
+# scroll to load.
 
 
 def _ready_selector(args) -> str:
@@ -242,11 +189,10 @@ def _ready_selector(args) -> str:
 def _min_matches(args, html: str = "") -> int:
     """The readiness threshold, lowered to what THIS page actually holds.
 
-    Passing the payload's own ad count is what keeps a short last page from
-    spending the whole timeout and then reporting itself unpainted: a jobs
-    category of 148 ads has a last page of 23, and one of 3 could never reach
-    the default 8. `page_flow.expected_cards` reads it out of the first
-    response, which is available before anything has hydrated.
+    `page_flow.expected_cards` reads how many instrument records the first
+    response holds, so a page that legitimately carries fewer than the
+    default floor is not left spending the whole timeout and then reported
+    as unpainted.
     """
     return page_flow.min_matches(args.mode, page_flow.expected_cards(html))
 
@@ -268,21 +214,10 @@ def _advertised_next_hrefs(page, page_num: int) -> List[str]:
     `page_flow.next_page_candidates` to filter — so the filtering rule lives
     in one place for all three engines.
 
-    This site advertises no page links at all — nine of them on page 1 of a
-    150-page query, absolute, spelling `?p=2` through `?p=9` — and it
-    publishes **no `<link rel="next">` at all**, on 3 of 3 captures. Only
-    `rel="canonical"`. So §7's most-durable layer simply does not exist on
-    this site and the selector reaches for a build artefact because there is
-    nothing better to reach for; you cannot order signals by durability when
-    the site declines to publish the durable one.
-
-    Worth resolving anyway, and worth filtering: a genre landing page's own
-    next link points at a DIFFERENT HOST
-    (`www.google.com/finance/category/100356/` advertises
-    `search.google.com/finance/search/mall/-/100356/?p=2`), which is exactly what
-    `page_url` builds for it — so a comparison that insisted on the same
-    host would reject the site's own link and cost the run its
-    `--concurrency` while looking like a safety decision.
+    This site advertises no page links at all and publishes no
+    `<link rel="next">` (absent on all 11 captures), so the selector is
+    empty and this returns nothing — see page_flow's "Pagination — there is
+    none". It is kept so the three engines' page loops stay identical.
     """
     selector = page_flow.next_page_selector(page_num)
     return [el.get_attribute("href") for el in page.query_selector_all(selector)]
@@ -326,10 +261,9 @@ def _same_url(a: str, b: str) -> bool:
     fetching — the exact divergence page_flow.py exists to prevent,
     reproduced inside one engine.
 
-    On this site the comparison has to strip a long tracking tail: a listing
-    anchor arrives with `?extParam=…keyword=kopi&search_id=…&src=search` and
-    a detail page's own canonical arrives with a UTM triple, so two views of
-    one page never match unless both sides are cleaned.
+    On this site the comparison is `canonical_url` on both sides, which
+    folds the older `/finance/...` spelling and the `/finance/beta/...` one
+    the site redirects it to into one address.
     """
     return page_flow.comparable(a) == page_flow.comparable(b)
 
@@ -487,12 +421,9 @@ def _connect_remote(pw, args):
     # challenges inside the browser: https://2captcha.com/scraper/browser-api/api
     # Tried first when --cdp-endpoint is set; this script's own detect+solve
     # logic still runs as a fallback if the endpoint does not support it.
-    # Note it does NOT cover this site's refusal, which is not a challenge:
-    # Akamai answers a headless browser with a 394-byte "Access Denied" that
-    # has nothing to solve on it, and a real window rather than a better
-    # address is the answer. No challenge has ever been observed here; this is
-    # wired
-    # up because one can appear between deploys.
+    # No challenge was met on this site in testing (README, "Captchas"); this
+    # is wired up because Google's `/sorry/index` interstitial carries a
+    # reCAPTCHA for addresses it scores badly, and one can appear any day.
     try:
         cdp_session = context.new_cdp_session(page)
         cdp_session.send("Captcha.setAutoSolve", {"autoSolve": True, "options": [{"type": "*"}]})
@@ -546,12 +477,10 @@ def _content_when_settled(page, attempts: int = 4, pause_ms: int = 700):
 
     Playwright raises `Page.content: Unable to retrieve content because the
     page is navigating and changing the content` if the document swaps under
-    it. Google Finance does not geo-redirect — `?lang=` is a query parameter and
-    the price is JPY for every visitor — but it DOES redirect on its own in
-    one measured case that this engine will meet routinely: `?p=151` of a
-    150-page query answers 301 to page 1. A snapshot taken right after
-    goto() can land exactly on that swap, so it is retried rather than
-    raised.
+    it. Google Finance DOES redirect on its own: every `/finance/...` url
+    302s to its `/finance/beta/...` spelling, so a snapshot taken right
+    after goto() can land exactly on that swap, and it is retried rather
+    than raised.
 
     Retries briefly and returns None if the page won't hold still, so the
     caller can skip a check instead of failing the run.
@@ -587,15 +516,11 @@ def handle_captcha_if_present(page, args) -> bool:
     solves both and this client would need the matching task type added —
     that is a TODO here, not a limit of the product (§19).
 
-    What is measured is narrower: no captcha of any kind is configured
-    anywhere on google.com/finance. Zero reCAPTCHA, hCaptcha, Turnstile,
-    DataDome, PerimeterX, Incapsula, Kasada or AWS WAF markers across nine
-    captures, served and refused alike; no challenge iframe; no
-    `data-sitekey`; no `*_SITE_KEY` in any page config. And Akamai's own
-    refusal here is 43 bytes long with **no widget on it at all** — which is
-    the narrow, honest use of the word unsolvable: a property of that PAGE,
-    not of any vendor. `detect_page_state` calls it "blocked" rather than
-    "challenge" precisely so no solve is attempted or billed for it.
+    What is measured is narrower: no captcha was rendered in testing —
+    every candidate marker scored zero across all 11 captures, served and
+    refused alike (README, "Captchas"). Google's own `/sorry/index`
+    interstitial does carry a reCAPTCHA for addresses it scores badly, and
+    this repo recognises that page.
 
     This path exists because a bot manager can be switched on between
     deploys, and because the family's rule is that detection stays broad:
@@ -703,12 +628,11 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     # With a pool, each retry moves to a DIFFERENT exit and the budget is the
     # user's `--proxy-block-retries`. WITHOUT one — the ordinary case here,
     # because this site needs no proxy — the retry re-fetches through the
-    # same access path once. Only once, and that is measured: what Akamai
-    # refuses on this site is an inconsistent client rather than an address
-    # (one datacentre IP was served by both curl and headless Chromium and
-    # refused only by curl wearing a Chrome UA), so a second and third
-    # identical attempt would confirm the same answer rather than change it.
-    # `page_flow.block_advice` says what to look at instead.
+    # same access path once. Only once: the commonest refusal on this site is
+    # the unsupported-client page, which is about the client rather than the
+    # address, so a second and third identical attempt would confirm the
+    # same answer rather than change it. `page_flow.block_advice` says what
+    # to look at instead.
     has_pool = bool(pool and len(pool) > 1)
     # `RETRY_ON_BLOCKED` is CONSULTED, not just documented. It was a
     # constant with a paragraph of justification that no engine read — a
@@ -797,13 +721,9 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         state = _classify(session.page, html)
 
         # "Not painted yet" is not a fault, and telling it apart from one is
-        # what the first live search run of this engine got wrong. A CATEGORY
-        # listing server-renders its grid container, so it classifies as
-        # content at domcontentloaded; a SEARCH grid arrives with the
-        # client-side GraphQL response, so at that moment the page is a
-        # 608 KB shell with no grid in it. Classified naively that is
-        # "unknown", "unknown" retries, and the run fetched the page twice,
-        # scrolled not at all and reported 0 rows with exit 4.
+        # a lesson tokopedia-scraper paid for: a page the site served whose
+        # content has not arrived yet, classified naively as "unknown",
+        # retries instead of waiting, and reports 0 rows with exit 4.
         #
         # So wait for the anchor and re-classify BEFORE the retry decision.
         # See page_flow.is_unpainted.
@@ -821,24 +741,20 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
             # `minimum` matches, so found == threshold is the SUCCESS case,
             # and `<=` reported "the grid still had not painted" for a page
             # that had painted completely. It only shows up on a page whose
-            # own hit count is at or below the floor — a query with fewer
-            # than 8 results — which is why it survived in this family: on a
-            # full 45-product page the threshold is 8 and nothing looks
-            # wrong. Found on a live run of a 5-result query.
+            # own record count is at or below the floor, which is why it
+            # survived in this family (a sibling found it on a 5-result
+            # query).
             if found < _min_matches(args, html):
-                logger.info("The grid still had not painted after %.0fs "
+                logger.info("The page still had not painted after %.0fs "
                             "(%d match(es)).", wait_timeout / 1000, found)
             html = _content_when_settled(session.page) or html
             state = _classify(session.page, html)
 
-        # No interstitial-settling step here, and its absence is measured
-        # rather than an omission. This site has no interstitial to settle: a
-        # refused request gets a 394-byte "Access Denied" with no markup at
-        # all, so there is nothing to wait out and nothing to reclassify. See
-        # page_flow's "There is no block page".
+        # No interstitial-settling step here: nothing on this site was
+        # measured settling on its own, so there is nothing to wait out.
         #
-        # The paid path is reached only for state "challenge", which NO
-        # capture of this site has ever produced. It is wired up because a
+        # The paid path is reached only for state "challenge", which none
+        # of this repo's 11 captures produced. It is wired up because a
         # bot manager can be switched on between deploys and a scraper that
         # cannot name what stopped it is much harder to fix — and bounded by
         # SOLVES_PER_PAGE so a speculative path cannot become a bill.
@@ -876,8 +792,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                 throttle_spent += 1
                 pause_ms = page_flow.throttle_delay_ms(throttle_spent)
                 logger.warning(
-                    "Page %d came back throttled — Google's own \"too many requests\" is "
-                    "concentrated\" page under HTTP 503. That is a rate "
+                    "Page %d came back throttled (HTTP 5xx). That is a rate "
                     "limit rather than a refusal, so waiting %.0fs and "
                     "re-fetching from the SAME exit (%d/%d). Raise --delay "
                     "if this keeps happening.",
@@ -932,15 +847,8 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     outcome.state = state
 
     if state == "blocked":
-        # What a caller needs to know here is that there is nothing to
-        # solve, and that a proxy is probably not the answer either. Akamai
-        # refuses this site with a 43-byte body whose whole content is
-        # `Reference  #18.…` — no widget, nothing for any solver at any
-        # price — and it arrives under **HTTP 200**, so the status code is
-        # not the signal.
-        #
-        # The dump is written even when it is empty, because "43 bytes" is
-        # itself the diagnosis here and a reader who finds no file at all
+        # The dump is written even when it is empty, because the size is
+        # itself part of the diagnosis and a reader who finds no file at all
         # cannot tell that from a run that never got this far.
         debug_html = f"{args.out}_page{page_num}_debug.html"
         with open(debug_html, "w", encoding="utf-8") as f:
@@ -948,24 +856,15 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         served = served_by_google(html or "")
         logger.error(
             "The site did not serve this request — %d bytes, %s the site's "
-            "own asset host, saved to %s. What clears it on this site is "
-            "usually NOT a different address, and that is measured rather "
-            "than assumed: on 2026-09-21 one datacentre IP was served the "
-            "full 45-product page both by plain curl and by headless "
-            "Chromium, and refused with this same 43-byte deny only when a "
-            "curl handshake claimed a Chrome User-Agent. What Akamai "
-            "refuses here is the CONTRADICTION between a claimed client and "
-            "the TLS fingerprint underneath it. So check for a fingerprint "
-            "you added before buying an exit: no --fingerprint and no "
-            "custom UA over --cdp-endpoint, and no browser UA on an HTTP "
-            "client. If the client is already consistent, --proxy with a "
-            "Japanese exit (or `country-jp` in a Scraping Browser login) is "
-            "the next thing to try. This is exit 3, distinct from a "
+            "own asset host, saved to %s. This is exit 3, distinct from a "
             "genuinely empty result (exit 4).%s",
             len(html or ""), "which references" if served else "with no "
             "reference to", debug_html,
             (f" Tried {block_retries + 1} exit(s)." if has_pool
              else f" Re-fetched {block_retries + 1} time(s)."))
+        logger.error("%s", page_flow.block_advice(
+            html, headless=bool(getattr(args, "headless", False)),
+            has_pool=has_pool))
         outcome.blocked_by = "no-response" if not html else "not-served"
         outcome.final_url = session.page.url
         return outcome
@@ -993,13 +892,12 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
             symbol_from_url(url) or url)
 
     if page_flow.should_parse(state):
-        # Never wait on `networkidle`, and this is not caution — it is
-        # measured. Google's telemetry beacons keep firing indefinitely: a
-        # probe counted 46 fetches and 13 pings still going after load, and a
-        # `networkidle` wait ran to its full 60s timeout and then raised, on
-        # a page that was complete in two seconds.
+        # Never wait on `networkidle`. On an ad- or telemetry-heavy page it
+        # never settles — rakuten-scraper measured such a wait running to its
+        # full 60s timeout and then raising, on a page complete in two
+        # seconds — and nothing here needs it.
         #
-        # NO scroll follows either. The payload holds all 45 products in the
+        # NO scroll follows either. The payload holds every record in the
         # first response, so a scroll here would be latency bought for
         # nothing — and a wait that times out costs nothing at all, because
         # every column in the output comes out of that payload rather than
@@ -1016,13 +914,9 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
             session.page.wait_for_timeout, selector, threshold, content_timeout)
         session.page.wait_for_timeout(500)
         if found < threshold:
-            # Not an error on its own, and what it MEANS depends on the
-            # mode — which is why the message does too. A listing page with
-            # no grid is a correct answer (a taxonomy hub, or one page past
-            # the end); a detail page whose buy box never painted is a
-            # different thing entirely, and on this site it is usually just
-            # slow rather than absent, because the row is parsed out of the
-            # page's JSON-LD and not out of the buy box.
+            # Not an error on its own: the rows are parsed out of the page's
+            # payload rather than out of the rendered links, so a slow paint
+            # does not cost a row.
             logger.info("No instrument links appeared within the readiness "
                         "timeout. On this site that is unusual rather than "
                         "expected: the rows come out of the page's own "
@@ -1050,7 +944,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     # Only for a state page_flow already counts as BLOCKED, and that
     # narrowing was earned twice.
     #
-    # A marker on a page whose ads have rendered guards nothing — that is the
+    # A marker on a page whose content has rendered guards nothing — that is the
     # "detected is not blocking" rule the captcha default follows, applied to
     # the blocking decision instead of the spending one. And `state !=
     # "content"` would still be too wide: an EMPTY page is a correct answer,
@@ -1060,11 +954,8 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     # The marker set itself is chosen the same way (§18): every candidate
     # was counted on pages the site plainly served before any of it was
     # trusted. `cf-turnstile` is excluded because the Scraping Browser's own
-    # auto-solve extension injects it into every page it loads, and a bare
-    # `akamai` is excluded because a CDN name is a fact about the site's
-    # infrastructure rather than a signal about this response. The set that
-    # remains scored 0 on all six served captures — which is also why it has
-    # never fired.
+    # auto-solve extension injects it into every page it loads. The set that
+    # remains scored 0 on this repo's captures (README, "Captchas").
     vendor = (detect_bot_challenge(html, url=session.page.url)
               if page_flow.counts_as_blocked(state) else None)
     if vendor:
@@ -1087,130 +978,8 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
             has_pool=has_pool))
         return outcome
 
-    # Did the SERVER serve the page we asked for? Read off
-    # `pagination.start`, never trusted from the request, because on this
-    # site neither out-of-range route fails in a way the client can see:
-    # `?p=151` of a 150-page query answers 301 to page 1 and then HTTP 200
-    # with 45 real products, and `/category/{id}/?p=2` answers 200 with page
-    # 1 without even redirecting. A run that trusted its own request would
-    # re-collect page 1 for as long as it was asked to and report a
-    # complete, entirely duplicate file (§23).
-    if args.mode == "listing":
-        # Compared against the page the fetched URL actually ASKS for, not
-        # against the loop's counter — a run started on a URL that already
-        # carries `?p=2` asks the site for page 2 while calling it page 1 of
-        # the run. See page_flow.requested_page_number.
-        asked = page_flow.requested_page_number(url, page_num)
-        outcome.served_requested_page = page_flow.served_the_page_asked_for(
-            html, asked)
-        if not outcome.served_requested_page:
-            served = page_flow.served_page_number(html)
-            logger.info(
-                "Asked Google for page %d and it served page %s — its own "
-                "`pagination.start` says so. That is the end of this "
-                "listing. The site does not error past the last page, it "
-                "re-serves page 1 with HTTP 200, and there are two ways to "
-                "get here: the query has fewer pages than you asked for, or "
-                "you passed page %d of the site's %d-page cap. Dropping "
-                "this page's rows, which are page %s over again.",
-                asked, served, parser_page_cap + 1, parser_page_cap,
-                served)
-            outcome.final_url = session.page.url
-            outcome.state = "empty"
-            return outcome
-
     products = _parse_for_mode(html, session.page.url, args, page_num)
     logger.info("Parsed %d row(s) from page %d.", len(products), page_num)
-
-    # This site publishes no arithmetic about a larger result set — `numFound`,
-    # `pageSize` and `subset` — so page count and completeness are computed
-    # rather than guessed. Both numbers are recorded, because on this site
-    # they are wildly different and only having both makes the run honest:
-    # one measured query reported `numFound` 3,053,682 against a `subset` of
-    # 6,750, so a full run of it is complete AND a 0.2% sample (§21).
-    #
-    # `numFound` is also a LIVING number and is recorded as the site's
-    # answer at this moment rather than asserted against — three fetches of
-    # one query inside a minute reported 3,053,682, 3,053,713 and 3,053,712.
-    if args.mode == "listing" and page_num == 1:
-        outcome.total_available = total_results(html)
-        outcome.header = search_header(html)
-        outcome.cap = page_flow.cap_summary(html)
-        # The currency the site stated, carried to the rest of the run.
-        # Google Finance publishes the JSON-LD block that names it on PAGE 1 ONLY
-        # (measured: 1 block on page 1, 0 on pages 2 and 3 of one query), so
-        # without this the first 45 rows carried "JPY" and the next 90
-        # carried null for products whose currency the site had already
-        # stated. Read once, never defaulted: a run that never got page 1
-        # leaves it null.
-        stated = currency_from_page(html)
-        if stated:
-            args._currency = stated
-            logger.info("Page 1's structured data states the currency as %s "
-                        "— carrying it to the rest of the run, since Google Finance "
-                        "publishes that block on page 1 only.", stated)
-        else:
-            logger.warning(
-                "Page 1 stated no currency. Google Finance normally declares "
-                "`priceCurrency` in this page's own JSON-LD; with no "
-                "statement to read, every row's `currency` will be null "
-                "rather than a guess.")
-        if capped_by_site(html):
-            logger.info(
-                "The site says this query matches %s products and will serve "
-                "%s of them (%d pages of %d). A run that reaches page %d is "
-                "COMPLETE as far as the site is concerned and is %.2f%% of "
-                "what it says it matched — narrow the query with the site's "
-                "own filters to reach the rest.",
-                f"{outcome.total_available:,}", f"{reachable_max(html):,}",
-                total_pages(html) or 0, page_flow.PAGE_SIZE,
-                total_pages(html) or 0,
-                100.0 * (reachable_max(html) or 0) / outcome.total_available)
-
-    if products and args.mode == "listing":
-        priced = sum(1 for p in products if p.price is not None)
-        share = 100.0 * priced / len(products)
-        floor = PRICE_FLOOR.get(args.mode, 0)
-        # Reported every time, not only when it looks wrong, so a consumer
-        # gets the number rather than a threshold someone guessed.
-        logger.info("Price coverage on page %d: %d/%d (%.0f%%); the measured "
-                    "floor is %d%%.",
-                    page_num, priced, len(products), share, floor)
-        if share < floor:
-            logger.warning(
-                "Only %.0f%% of page %d carries a price, against a measured "
-                "floor of %d%%. Every one of 405 rows across 11 captured "
-                "pages had one, so this is the read breaking rather than the "
-                "page being unusual — re-run with --dump-html.",
-                share, page_num, floor)
-
-        # There is deliberately NO structured-vs-displayed price
-        # confirmation share here, and its absence is measured rather than an
-        # omission. This site has no second view to reconcile against: the
-        # payload carries the price and the rendered tile prints that same
-        # number formatted, so `price_source` is "state" on every listing row
-        # and a confirmation threshold would describe nothing. Porting a
-        # sibling repo's overlay would be dead code that looks load-bearing
-        # (§4).
-        #
-        # What IS worth reporting is the share of rows Google Finance publishes a
-        # was-price for, because on the listing route the honest answer is
-        # ZERO and a reader needs to know that is the site rather than the
-        # parser. The payload has no was-price field at all; the detail
-        # route does, gated on the site's own
-        # `doublePrice.referencePriceVerified` flag.
-        rated = sum(1 for p in products if p.rating is not None)
-        logger.info(
-            "Rating coverage on page %d: %d/%d (%.0f%%). A null here means "
-            "the site has no figure — it writes that as "
-            "`{score: 0, numReviews: 0}` and both columns are nulled "
-            "together, on 28 of 405 measured rows.",
-            page_num, rated, len(products), 100.0 * rated / len(products))
-        if any(p.original_price is not None for p in products):
-            logger.info(
-                "This page carries a verified was-price, which the listing "
-                "payload was measured never to publish — worth a look, the "
-                "site may have added the field.")
 
     if not products:
         debug_html = f"{args.out}_page{page_num}_debug.html"
@@ -1332,15 +1101,9 @@ def scrape(args) -> int:
     # two of the root page's lists — 2 symbols on the 2026-09-22 US capture
     # — and deduping on `sku` would drop whichever list was parsed second.
     dedupe_key = DEDUPE_KEY_BY_MODE.get(args.mode, "sku")
-    # Why the loop ended. "completed" means every requested page was fetched;
-    # "no_new_products" means the listing itself ran out (also a complete
-    # result). "single_page_mode" is complete by construction — a detail page
-    # has no page 2. Anything else is an early stop, and the run is only a
-    # partial view.
-    # Only --mode product is single-page, and "end_of_listing" is complete
-    # too: the site said it served a page other than the one asked for, which
-    # on Google Finance means the query ran out and the site answered with page 1
-    # anyway rather than erroring.
+    # Why the loop ended. "completed" means every requested page (here: every
+    # requested symbol) was fetched. Anything else is an early stop, and the
+    # run is only a partial view.
     stop_reason = "completed"
 
     pool = proxy_pool_from_args(args)
@@ -1363,10 +1126,7 @@ def scrape(args) -> int:
             logger.warning("--concurrency %d with no proxy pool: every worker "
                            "leaves from the SAME address, which is a faster way "
                            "to get that address scored than to gather data. "
-                           "Google Finance already answers a client going too fast "
-                           "with HTTP 503 and its own \"access is "
-                           "concentrated\" page, so N workers from one "
-                           "address is the quickest way to meet it. Pass "
+                           "Pass "
                            "--proxy-file to spread the load, or raise "
                            "--delay.", concurrency)
         if pool and pool.rotates_per_page():
@@ -1457,19 +1217,6 @@ def scrape(args) -> int:
                     seen_keys.update(p.sku for p in outcome.products
                                      if p.sku is not None)
 
-                    # The site said it served a different page than the one
-                    # asked for. A distinct stop_reason from
-                    # `no_new_products`, because they mean different things
-                    # and a reader needs to tell them apart: this one is
-                    # "the listing ended and the site answered with page 1
-                    # anyway", while `no_new_products` is "the catalogue
-                    # repeated itself". Checked BEFORE the dedupe-based
-                    # terminator, since a re-served page 1 would trip that
-                    # one too and report the vaguer reason.
-                    if not outcome.served_requested_page:
-                        stop_reason = "end_of_listing"
-                        break
-
                     # A page past the first that contributes nothing new
                     # means the end of the results — or that pagination is
                     # looping back on itself. Either way there is nothing
@@ -1501,77 +1248,13 @@ def scrape(args) -> int:
         fresh = dedupe_by_key(oc.products, merged_seen, key=dedupe_key)
         if len(fresh) < len(oc.products):
             # Not necessarily "on an earlier page" — a duplicate can be on
-            # this page. This site's pagination was measured NOT repeating:
-            # 52 rows across two live pages, 52 distinct sku, including two
-            # DIFFERENT Cars of the Week because the site rotates that slot.
-            # But a classifieds listing reorders as sellers bump their ads to
-            # the top, so a small non-zero count here is expected and a large
-            # one is not.
+            # this page. In the list modes the key is (sku, listing), so a
+            # symbol that is both a gainer and among the most active stays
+            # in both lists; a drop here is a genuine repeat.
             logger.info("Page %d: dropped %d duplicate row(s).",
                         oc.page_num, len(oc.products) - len(fresh))
         all_rows.extend(fresh)
 
-    # Completeness, checked over the MERGED result rather than per page — a
-    # per-page check cannot see a gap BETWEEN two pages, which is exactly
-    # where a short page hides.
-    #
-    # NOT "pages x rows-per-page". Google Finance's page size is steady at 45 on 11
-    # of 11 captures — including page 150, the last page of a capped query —
-    # but the last page of a query with fewer than 6,750 total hits is
-    # legitimately short, so multiplying the fullest page by the page count
-    # would warn on healthy runs, and a threshold that fires on every
-    # healthy run teaches the reader to ignore it.
-    #
-    # What is worth warning about is a page that came back materially THIN
-    # against its siblings — that is what a truncated response or a
-    # half-painted grid looks like. A page holding less than 60% of the
-    # fullest page is well outside the +-3% spread that the varying page size
-    # accounts for.
-    total_available = next((o.total_available for o in outcomes
-                            if o.total_available is not None), None)
-    if args.mode == "listing" and all_rows:
-        counts = [(o.page_num, len(o.products)) for o in outcomes if o.ok]
-        fullest = max((n for _, n in counts), default=0)
-        thin = [(p, n) for p, n in counts
-                if fullest and n < THIN_PAGE_SHARE * fullest]
-        # The LAST page of a listing is legitimately short — the catalogue
-        # simply ran out — so it is excluded unless there are pages after it.
-        last_page = max((p for p, _ in counts), default=0)
-        thin = [(p, n) for p, n in thin if p != last_page]
-        if thin:
-            logger.warning(
-                "Page(s) %s came back much thinner than the fullest page "
-                "(%d rows): %s. A truncated response or a half-painted grid "
-                "looks like this — re-run with --dump-html to check the "
-                "snapshot for those pages.",
-                ", ".join(str(p) for p, _ in thin), fullest,
-                ", ".join("page %d: %d" % (p, n) for p, n in thin))
-        if total_available:
-            logger.info("This listing holds %d product(s) in total; this run "
-                        "took %d (%.1f%%).", total_available, len(all_rows),
-                        100.0 * len(all_rows) / total_available)
-            # The pages the CATALOGUE has that the site will NOT address. A
-            # run that stops at the cap is complete as far as the site is
-            # concerned and truncated as far as the catalogue is, and only
-            # saying so lets a consumer tell the two apart. Computed from the
-            # total the payload already stated rather than from another fetch.
-            # `fullest` is this run's own observed page size, which is what
-            # the site actually served rather than a number hardcoded here.
-            beyond = (max(0, -(-total_available // fullest) - parser_page_cap)
-                      if fullest else 0)
-            if beyond:
-                logger.warning(
-                    "This query is %d page(s) deeper than the site will "
-                    "address. It caps every query at 6,750 results — 150 "
-                    "pages of 45 — however many it matched, and it states "
-                    "that itself as `pagination.subset`. One measured query "
-                    "reported 3,053,682 matches against that same 6,750, so "
-                    "99.8%% of it cannot be reached through pagination at "
-                    "all, and a request past page 150 does not fail: it "
-                    "redirects to page 1 and serves it with HTTP 200. "
-                    "Narrow the query with the site's own filters — genre, "
-                    "price band, shop, tag — and run each slice.",
-                    beyond)
 
     ok_pages = [o for o in outcomes if o.ok]
     failed_pages = [o.page_num for o in outcomes if not o.ok]
@@ -1580,14 +1263,6 @@ def scrape(args) -> int:
 
     # One-per-run context, in the sidecar rather than repeated down a column.
     #
-    # In --mode product that is the merchant's own id, name and tax rate off
-    # the item page. In --mode listing it is the site's own arithmetic about
-    # the query, and on this site that is not optional decoration: a
-    # `status: complete` run of a query the site caps at 6,750 of 3,053,682
-    # matches is complete and is a 0.2% sample, and a sidecar that said only
-    # "complete" would be lying by omission (§21). It also gives
-    # `diff_runs.py` the third meaning of `removed` — not delisted, not
-    # un-fetched, but outside this run's slice of a capped result set.
     # Always recorded, never conditional. `market` is what makes two runs
     # comparable or not: the root page's lists are geo-selected, so a gl=US
     # run and a gl=DE run are two SAMPLES rather than a before and an after,
@@ -1595,9 +1270,9 @@ def scrape(args) -> int:
     # reporting every row as added and removed.
     #
     # `capped_by_site` is True on every run here and means the OPPOSITE of
-    # what it means in the sibling this field came from. There it meant "the
-    # site will serve you 15 of 1,268 pages, so a complete run is a 1.2%
-    # sample". Here it means one page IS everything the site publishes for
+    # what it means in bbb-scraper, the sibling this field came from. There
+    # it meant "the site will serve you 15 of 1,268 pages, so a complete run
+    # is a 1.2% sample". Here it means one page IS everything the site publishes for
     # this url, so a one-page run is exhaustive. The sidecar says which,
     # through `paginates: false` beside it, and no warning is logged —
     # warning on every healthy run is how a reader learns to ignore
@@ -1613,9 +1288,6 @@ def scrape(args) -> int:
     }
     if args.category:
         extra["strip_filter"] = args.category
-    headers = {o.page_num: o.header for o in outcomes if o.header}
-    if headers:
-        extra["page_language"] = headers
 
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,
@@ -1852,32 +1524,13 @@ def parse_args():
     # of 4 headless against 4 of 4 headful and the family default had been
     # headless simply because headless is what a scraper does.
     #
-    # Measured 2026-09-21 from one datacentre address, and the answer is
-    # PER-ROUTE, which is the part worth carrying forward:
-    #
-    #   search / item / category   headless 200 (855 KB, payload present)
-    #                              headful  200 (969 KB, payload present)
-    #   ranking.google.com/finance      headless 403, 3 of 3 (one timeout first)
-    #                              headful  200, 3 of 3, 416 KB
-    #
-    # So the routes this scraper reads do not care, and headless is right as
-    # the default. The browser even announces itself on those routes — a
-    # tracking beacon from the headless run carried
-    # `HeadlessChrome;153.0.8010.12` — and Akamai served it anyway.
-    #
-    # But one route on this site does care, and it is the one this repo does
-    # not read. "Does Google Finance block headless browsers?" therefore has no
-    # single answer, which is why the measurement is written as a table
-    # rather than as a sentence.
+    # Headless is the default because it was served here: the README's
+    # 2026-09-22 client table has headless Chromium getting the real page
+    # from a datacentre address. Headful was not measured on this site.
     p.add_argument("--headful", dest="headless", action="store_false",
-                   help="Run with a real browser window. Not needed for the "
-                        "routes this scraper reads — search, genre and item "
-                        "pages were all served headless in testing. Worth "
-                        "knowing that ranking.google.com/finance, which this repo "
-                        "does NOT read, answered 403 headless and 200 "
-                        "headful from the same address, so if Google Finance ever "
-                        "extends that to the listing routes this is the "
-                        "flag to reach for.")
+                   help="Run with a real browser window. Not needed in "
+                        "testing: headless Chromium was served the real "
+                        "page from a datacentre address.")
     p.add_argument("--headless", dest="headless", action="store_true",
                    default=True,
                    help="Run headless. THE DEFAULT. Ignored with "

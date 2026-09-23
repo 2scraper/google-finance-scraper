@@ -8,27 +8,31 @@ the identifier the README already tells people to diff on for price
 monitoring and assortment tracking, but that nothing in this repo actually
 computed.
 
-    python3 diff_runs.py --old watches.2026-09-01.json \\
-                          --new watches.2026-09-07.json
+    python3 diff_runs.py --old financials.2026-09-01.json \\
+                          --new financials.2026-09-07.json
 
-Typical use is a scheduled re-run of one of the four scraper engines, kept
+Typical use is a scheduled re-run of one of the three scraper engines, kept
 under a dated filename, diffed against the previous one:
 
-    python3 playwright_scraper.py --url "$URL" --out "girls_$(date +%F)"
-    python3 diff_runs.py --old "girls_$(ls -t girls_*.json | sed -n 2p)" \\
-                          --new "girls_$(date +%F).json" --out diff.json
+    python3 playwright_scraper.py --mode financials --symbols GOOGL:NASDAQ \\
+        --out "financials_$(date +%F)"
+    python3 diff_runs.py --old "$(ls -t financials_*.json | sed -n 2p)" \\
+                          --new "financials_$(date +%F).json" --out diff.json
+
+Pass the same --mode and --market to both runs: diff_runs.py refuses a pair
+whose modes or markets differ.
 
 Four buckets, each keyed on sku:
 
   added          — sku present in --new, absent from --old
   removed        — sku present in --old, absent from --new (delisted, or just
                    off this particular page/category run)
-  changed        — sku present in both, with a different price,
-                   original_price, discount_pct, currency or in_stock
-  source_changed — sku present in both with a different price, but also a
-                   different price_source: one run got the DOM-corrected
-                   figure and the other the raw JSON-LD one, so the two are
-                   not comparable on price. Reported separately because this
+  changed        — sku present in both, with a different value in one of
+                   TRACKED_FIELDS (price, change, revenue, eps, close, ...)
+                   or a different currency
+  source_changed — sku present in both with a different value, but also a
+                   different price_source, so the two are not comparable
+                   on price. Reported separately because this
                    says something about our own two snapshots, not about the
                    site — and --fail-on-change deliberately ignores it.
 
@@ -46,45 +50,23 @@ from typing import Dict, List, Optional, Tuple
 
 from output_writer import UNIQUE_BY_SKU_MODES, DEDUPE_KEY_BY_MODE
 
-# What a price monitor on Google Finance actually needs to watch, which is more
-# than the price.
-#
-# `points` and `point_rate` are in here and that is the Google Finance-specific
-# decision worth explaining: a 10x point campaign on this marketplace is
-# effectively a 10% discount that never touches the price column. A monitor
-# watching `price` alone would call a product unchanged through the whole of
-# a Super Sale. `points` was non-null on 405 of 405 measured rows, so it is
-# a column that reliably carries the signal.
-#
-# `price_max` is here because 95 of 405 rows are a RANGE — an item whose
-# variants differ — so a change in the top of the range is a real price
-# change that the bottom of it can hide. `subscription_price` likewise: it is
-# a different offer on the same product (54 of 405 rows), always below
-# `price`, and a shop can move it on its own.
-#
-# NOT tracked: `rating` and `review_count`, which drift upwards constantly
-# and would make every diff noisy, and `genre_rank`, which is the item's
-# standing in a listing this run never fetched.
-TRACKED_FIELDS = ("price", "original_price", "discount_pct", "currency",
-                  "price_max", "subscription_price", "points", "point_rate",
-                  "shipping_fee", "free_shipping", "in_stock")
-
-# The subset of TRACKED_FIELDS whose comparability depends on price_source
-# matching between the two runs — see diff_products.
-#
-# All five money columns are in it, and on this site that guard earns its
-# keep across MODES rather than across rendering states: a listing row
-# (`price_source: "state"`) publishes no was-price at all while a product row
-# (`"itemdata"`) publishes one where Google Finance's own verification flag allows
-# it. So diffing a listing run against a product run would otherwise report
-# a discount appearing on every product in the file, and not one of those
-# would be a price change.
-# What a diff reports a change in, across all five row classes. A field
-# absent from a row class is simply never compared, so one tuple serves all
-# of them.
+# The value columns whose comparability depends on price_source matching
+# between the two runs — see diff_products — across all five row classes. A
+# field absent from a row class is simply never compared, so one tuple
+# serves all of them.
 PRICE_FIELDS = ("price", "prev_close", "change", "change_pct",
                 "target_mean", "target_low", "target_high",
                 "revenue", "net_income", "eps", "close")
+
+# What a diff reports a change in: those value columns plus `currency`.
+#
+# This carried a retail sibling's list — was-price, discount, points,
+# shipping fee, stock flag — until 2026-09-23, and only `price` and
+# `currency` of it exist on any row here. So a financials run whose revenue
+# moved, a chart run whose close moved, and a quote whose change_pct moved
+# all diffed as "0 changed". Deriving the list from PRICE_FIELDS keeps the
+# two from drifting apart again.
+TRACKED_FIELDS = PRICE_FIELDS + ("currency",)
 
 
 def _load(path: str) -> List[dict]:
@@ -193,16 +175,6 @@ def diff_products(old: List[dict], new: List[dict],
     added = [new_by_sku[sku] for sku in new_by_sku.keys() - old_by_sku.keys()]
     removed = [old_by_sku[sku] for sku in old_by_sku.keys() - new_by_sku.keys()]
 
-    # NO `lifecycle` bucket, and its absence is a decision with a reason
-    # rather than an omission. A sibling repo needs one because its site
-    # rotates ads in and out of a promoted slot that appears in the rows, so
-    # a placement move would otherwise read as a price change. Google Finance also
-    # sells placement — 7 of 52 payload entries on one measured page — but
-    # those sponsored entries never become rows at all: they carry a
-    # click-tracking redirect instead of a product URL and `parse_products`
-    # drops them. So there is no placement column for a lifecycle bucket to
-    # key on, and porting one would be dead code that looks load-bearing
-    # (§4).
     changed, source_changed, within_tolerance = [], [], []
     for sku in old_by_sku.keys() & new_by_sku.keys():
         before, after = old_by_sku[sku], new_by_sku[sku]
@@ -215,13 +187,9 @@ def diff_products(old: List[dict], new: List[dict],
             continue
 
         # A row whose price_source differs between runs is not comparable on
-        # price: here that means one run had its structured price confirmed
-        # against a rendered tile ("jsonld+dom") while the other did not
-        # ("jsonld"), or fell back to reading the DOM alone ("dom"). The
-        # figures should agree, and when they do not, the difference is in
-        # how OUR two snapshots rendered, not in what the shop charges.
-        # Reporting it as a price change would be a false alarm about the
-        # site. Non-price fields still compare fine.
+        # price: the difference is in how OUR two snapshots were read, not in
+        # what the market did. Reporting it as a price change would be a
+        # false alarm about the site. Non-price fields still compare fine.
         sources = (before.get("price_source"), after.get("price_source"))
         if sources[0] != sources[1] and any(f in field_changes for f in PRICE_FIELDS):
             price_part = {f: v for f, v in field_changes.items() if f in PRICE_FIELDS}
@@ -444,13 +412,8 @@ def parse_args():
                    help="Treat a price move smaller than PCT%% as an exchange-"
                         "rate tick rather than a price change: reported "
                         "separately and ignored by --fail-on-change. Default "
-                        "0, which is what a Google Finance run wants for two "
-                        "reasons: the site quotes JPY to every visitor so "
-                        "there is no conversion drift to absorb, and the yen "
-                        "has no subunit, so every price is a whole number and "
-                        "there is no rounding tick either. The flag is "
-                        "inherited from this scraper family; set it non-zero "
-                        "only with a reason you can state.")
+                        "0. The flag is inherited from this scraper family; "
+                        "set it non-zero only with a reason you can state.")
     p.add_argument("--fail-on-change", action="store_true",
                    help="Exit 1 if anything was added, removed or changed — "
                         "for a cron job that should only notify on a real diff.")

@@ -11,7 +11,8 @@ __pycache__/
 .venv/
 venv/
 env/
-dubizzle_listings.*
+google_finance.*
+google_finance_*.*
 *_debug.html
 *_debug.png
 live_results/

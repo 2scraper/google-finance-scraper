@@ -296,9 +296,9 @@ def playwright_init_script(fp: dict) -> str:
     # sets the header and the single primary language and nothing else.
     #
     # A one-element languages list beside a two-element Accept-Language is
-    # a small contradiction, and the site this repo reads is the one that
-    # punishes contradictions specifically: Akamai refuses a client whose
-    # claimed identity disagrees with itself. Cheap to close, so closed.
+    # a small contradiction, and rakuten-scraper's site is one that punishes
+    # contradictions specifically: Akamai refuses a client whose claimed
+    # identity disagrees with itself. Cheap to close, so closed.
     languages = intl.get("languages")
     if not (isinstance(languages, list) and languages):
         languages = None

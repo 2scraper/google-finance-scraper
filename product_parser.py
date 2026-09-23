@@ -1574,11 +1574,6 @@ def page_url(url: str, page: int) -> str:
     return canonical_url(url)
 
 
-def search_header(html: Optional[str] = None) -> Optional[str]:
-    """The site states no result header on any page kind here."""
-    return None
-
-
 def concurrency_limit(url: str = "") -> Optional[int]:
     """1 — but per PAGE, not per symbol.
 

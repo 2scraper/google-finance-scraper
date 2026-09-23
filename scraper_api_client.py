@@ -6,45 +6,25 @@ One HTTP request per page, no local browser, no Playwright install. The
 the HTML; this client parses it with the same `product_parser` the browser
 engines use, so the rows and columns are identical.
 
-MEASURED ON THIS SITE, 2026-09-21
----------------------------------
-It works, and it is the cheapest way in:
-
-    POST https://scraper.2captcha.com/tasks/sync
-    -> HTTP 200, 1,092,737 bytes of HTML, 45 products parsed, $0.0005
-
-Its 52-entry payload carried 7 sponsored placements, which the parser
-dropped with a log line — the same behaviour as every other transport, which
-is the point of this client sharing `product_parser` rather than having its
-own.
-
-This section previously said the path was unverified, because no key was
-available to the session that wrote the repo. That was the honest sentence at
-the time and it is worth saying why it was phrased that way: a sibling repo
+NOT RUN ON THIS SITE
+--------------------
+This path has not been run against Google Finance, so nothing here states
+what it returns. That is "not run", never "does not work": a sibling repo
 once shipped a README telling readers a 2Captcha key would not help them,
-when the truth was that the client had not implemented the task type — a
-claim about the PRODUCT made from a fact about the CODE, invisible to every
-test, and wrong in the direction that costs a reader money. So the rule is
-that an unrun path says "not run", never "does not work".
+when the truth was that the client had not implemented the task type.
 
 WHAT TO KNOW BEFORE USING IT HERE
 ---------------------------------
-* The gate on this site is the CONSISTENCY of the client, not the address.
-  Measured from one datacentre IP: plain curl with curl's own User-Agent was
-  served 92 KB and 45 products; the same curl claiming a Chrome User-Agent
-  got a 43-byte Akamai deny. This API's fetcher gets in, so whatever it
-  sends is self-consistent — but that is a fact about the API today, not a
-  guarantee, and it is exactly the kind of thing to re-measure rather than
-  inherit.
-* If it is ever refused, the refusal arrives under **HTTP 200** with a
-  43-byte body. Neither this client nor the parser may trust the status
-  code; both decide "was this served at all" from the reference-id shape and
-  from the page being built out of Google Finance's own asset hosts.
-* One request is one page. There is no pagination here — pass `?p=N`
-  yourself, and mind that Google Finance caps every query at 6,750 results.
+* The gate this repo measured on Google Finance is the CLIENT: curl with
+  its own User-Agent is redirected to `/finance/beta/unsupported` and gets
+  no data, while a Chrome User-Agent gets the real page (README, "Blocks").
+  Whether this API's fetcher is served depends on what it sends, which is
+  exactly the kind of thing to measure rather than assume.
+* One request is one page, and Google Finance does not paginate: a quote
+  url is one instrument and the root carries every market list.
 
     python3 scraper_api_client.py \\
-        --url "https://search.google.com/finance/search/mall/コーヒー/"
+        --url "https://www.google.com/finance/quote/GOOGL:NASDAQ"
 
     # $TWOCAPTCHA_KEY is read from the environment or .env, so a key never
     # has to be typed — a secret in argv is readable by anything that can run
@@ -197,10 +177,10 @@ def fetch_html(args) -> str:
     upstream_status = body.get("status")
     logger.info("Upstream page status %s, %d bytes of HTML.", upstream_status, len(html))
     # The STATUS is returned alongside the HTML, not thrown away. It used to
-    # be, and that cost this engine the family's central distinction. On this
-    # site a refusal carries no markup at all — nothing a challenge check
-    # on it, so the challenge check below finds nothing and the run fell
-    # through to "0 products" and exit 4. A pipeline branching on the exit
+    # be, and that cost this engine the family's central distinction in a
+    # sibling repo: a refusal carrying no markup gave the challenge check
+    # below nothing to find, and the run fell through to "0 products" and
+    # exit 4. A pipeline branching on the exit
     # code then reads a block as an empty category. See detect_page_state,
     # which the three browser engines already reach through page_flow.
     return html, upstream_status
@@ -248,7 +228,7 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
         logger.info("Raw HTML written to %s", args.dump_html)
 
     # Same policy as the browser engines: the status decides the blocked
-    # case, because this site's refusal has no marker to detect.
+    # case as well as the markup, because a refusal may carry no marker.
     state = detect_page_state(html, status=upstream_status, url=args.url)
     if state == "blocked":
         dump = f"{args.out}_scraperapi_debug.html"
@@ -256,11 +236,9 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
             f.write(html)
         logger.error(
             "The site did not serve the Scraper API's request (upstream "
-            "HTTP %s, %d bytes) — saved to %s. Measured 2026-09-10: the "
-            "Scraper API's own exit is a datacentre address, and this site "
-            "answers those with NOTHING, while the same task routed through "
-            "a Scraping Browser session returned 200 and 417 KB. Pass "
-            "--cdp-url. This is exit 3, distinct from an empty result "
+            "HTTP %s, %d bytes) — saved to %s. --cdp-url routes the fetch "
+            "through a Scraping Browser session instead. This is exit 3, "
+            "distinct from an empty result "
             "(exit 4).", upstream_status, len(html), dump)
         return 3
 
@@ -271,9 +249,8 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
             vendor, len(html),
         )
         logger.error("A challenge page is not a final answer — retry before concluding "
-                     "anything (--retries). This site needs a rendered browser in the "
-                     "path: pass --cdp-url, or use playwright_scraper.py / "
-                     "puppeteer_scraper.py directly.")
+                     "anything (--retries). Pass --cdp-url, or use "
+                     "playwright_scraper.py / puppeteer_scraper.py directly.")
         return 3
 
     products = parse_products(html, args.url, category=args.category)
@@ -293,12 +270,8 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
 def parse_args():
     p = argparse.ArgumentParser(
         description="Google Finance scraper — 2captcha Scraper API edition (no "
-                    "local browser). NOTE: these pages DO need JavaScript, "
-                    "and their grid hydrates only as the page is scrolled, "
-                    "so a single fetch returns about 5 products where a "
-                    "browser engine returns 60. Pass --cdp-url to reach the "
-                    "site at all; see this file's docstring for the measured "
-                    "numbers, and prefer playwright_scraper.py.")
+                    "local browser). Not run against this site yet; see this "
+                    "file's docstring, and prefer playwright_scraper.py.")
     # NOT required: prefer the TWOCAPTCHA_KEY env var. A key passed on the
     # command line is visible to anyone who can run `ps`, and it lands in
     # shell history and in any log that echoes the command line.
@@ -306,10 +279,8 @@ def parse_args():
                    help="2captcha.com API key (sent as a Bearer token). "
                         "Defaults to $TWOCAPTCHA_KEY, which is the safer way to pass it.")
     p.add_argument("--url", default=None,
-                   help="A Google Finance listing URL — a keyword search "
-                        "(/p/<cat>/<sub>/<subsub>) is the only kind this path "
-                        "can read at all, since a search grid has no "
-                        "server-rendered container. Required, unless "
+                   help="A Google Finance URL — a quote page "
+                        "(/finance/quote/GOOGL:NASDAQ). Required, unless "
                         "GOOGLE_FINANCE_URL is set in the environment or in .env.")
     p.add_argument("--category", default=None, help="Label to tag output rows with. Defaults to the category segment of the URL, so the column is never empty just because the flag was omitted.")
     p.add_argument("--format", choices=["json", "csv", "both"], default="both")
