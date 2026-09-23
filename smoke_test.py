@@ -1887,6 +1887,65 @@ def test_concurrency_machinery(skips):
     return ok
 
 
+def test_scraper_api_waitfor_object_and_http_code():
+    """Measured 2026-09-23 against the live Scraper API: `waitFor` sent as
+    a JSON-encoded string is refused with HTTP 422 and still billed, and
+    the response's `status` is the API's verdict ("success") while the
+    target's own code is `http_code`. Drives the real fetch_html with
+    requests.post replaced, so no network and no money."""
+    import argparse
+    import logging
+    import scraper_api_client as sac
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+        headers = {}
+        text = ""
+
+        def json(self):
+            return {"status": "success", "http_code": 403, "body": "<html></html>"}
+
+    def _fake_post(url, **kw):
+        captured["json"] = kw.get("json")
+        return _Resp()
+
+    logged = []
+
+    class _H(logging.Handler):
+        def emit(self, record):
+            if str(record.msg).startswith("Upstream page status"):
+                logged.append(record.args[0])
+
+    h = _H()
+    real_post = sac.requests.post
+    sac.requests.post = _fake_post
+    sac.logger.addHandler(h)
+    result = None
+    try:
+        args = argparse.Namespace(url='https://www.google.com/finance/beta/quote/GOOGL:NASDAQ', key="k", timeout=60, cdp_url=None,
+                                  wait_text='GOOGL', wait_element=None,
+                                  wait_state=None)
+        result = sac.fetch_html(args)
+    finally:
+        sac.requests.post = real_post
+        sac.logger.removeHandler(h)
+    # Where fetch_html returns (html, status) the status handed onward is
+    # the second element; where it returns only the html, the log line is
+    # the only place the status goes.
+    handed = result[1] if isinstance(result, tuple) else (logged[0] if logged else None)
+    wf = (captured.get("json") or {}).get("waitFor")
+    ok = True
+    ok &= check("Scraper API: --wait-text sends waitFor as an OBJECT, not a JSON string "
+                "(a string is HTTP 422 and still billed, measured 2026-09-23)",
+                isinstance(wf, dict) and wf.get("text") == 'GOOGL')
+    ok &= check("Scraper API: the target status handed onward is http_code (403, an int), "
+                "not the API's own 'success' verdict",
+                type(handed) is int and handed == 403 and logged == [403])
+    return ok
+
+
+
 def main() -> int:
     ok = True
     # Checks that could not run because an optional engine library is absent.
@@ -1932,6 +1991,7 @@ def main() -> int:
     ok &= test_many_currencies_in_one_run_is_normal_here()
     ok &= test_no_public_function_without_a_consumer()
     ok &= test_canary_is_coherent()
+    ok &= test_scraper_api_waitfor_object_and_http_code()
     ok &= test_engines(skips)
     ok &= test_concurrency_machinery(skips)
 
