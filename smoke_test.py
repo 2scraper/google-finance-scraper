@@ -1608,19 +1608,74 @@ def test_ci_checks_is_wired_up():
     return ok
 
 
-# A regional refusal, RECONSTRUCTED rather than captured — said plainly
-# because every other fixture in this repo is cut from a real page and
-# verified to parse identically to it. This one cannot be: the condition is
-# invisible from the exits this repo has, and both of them (Helsinki and
-# GitHub's runners) are in regions Google serves Finance in. It was reported
-# by a third-party audit on 2026-09-24, with the status and the sentence
-# quoted. What the checks below test is therefore the MARKER and the state
-# machine around it, not a claim about the page's exact bytes.
+# A regional refusal, CAPTURED. Fetched 2026-09-24 through a 2Captcha
+# residential exit with `-region-ru` in the login — the one region of ten
+# tested that Google refuses. The only per-response value in the page, a
+# CSP nonce, is scrubbed; there is no IP, token, cookie or reference id in
+# it at all.
+#
+# It replaced a RECONSTRUCTION written from an audit report, and the
+# reconstruction was wrong in a detail that matters for nothing except
+# honesty: the real title is "Error 403 (Unavailable)", not "(Forbidden)".
+# Which is the argument for capturing rather than writing out what a
+# report quoted.
+#
+# Measured with the exit pinned by `-region-XX`, never by asking an IP
+# service what the exit was: the two calls go over separate connections
+# and a rotating login answers them from different addresses, which
+# produced one confidently wrong country label before it was noticed.
+#
+#     -region-ru             403 + marker, 4 of 4 (3 quotes + the root)
+#     us de fr hu pl cz at   200, served
+#
+# And `gl` does NOT get past it: from the refused exit, `?gl=US&hl=en` on
+# both the quote route and the root answered 403 with the same marker.
 REGION_403 = (
-    "<html><head><title>Error 403 (Forbidden)!!1</title></head><body>"
-    "<p><b>403.</b> <ins>That\u2019s an error.</ins></p>"
-    "<p>Google Finance is currently not supported in your region."
-    "<ins>That\u2019s all we know.</ins></p></body></html>"
+    '<html lang=en><meta charset=utf-8><meta name=viewport content="initial-scale=1, minimum-scale=1, width=device-width"><title>Error 403 (Unavailable)</title><style nonce="<NONCE-SCRUBBED>">\n'
+    '      * { margin: 0; padding: 0; }\n'
+    '      html, code { font: 15px/22px arial, sans-serif; }\n'
+    '      html { background: #fff; color: #222; padding: 15px; }\n'
+    '      body { color: #222; text-align: unset; margin: 7% auto 0; max-width: 390px; min-height: 180px; padding: 30px 205px 15px 0; }\n'
+    '      * > body { background: url(//www.google.com/images/errors/robot.png) 100% 5px no-repeat; padding-right: 205px; }\n'
+    '      p { margin: 11px 0 22px; overflow: hidden; }\n'
+    '      pre { white-space: pre-wrap; }\n'
+    '      ins { color: #777; text-decoration: none; }\n'
+    '      a img { border: 0; }\n'
+    '      #google-logo {\n'
+    '        background: url(//www.google.com/images/branding/googlelogo/1x/googlelogo_color_150x54dp.png) no-repeat;\n'
+    '        margin-left: -5px;\n'
+    '        display: inline-block;\n'
+    '        height: 54px;\n'
+    '        width: 150px;\n'
+    '      }\n'
+    '      @media only screen and (min-resolution: 192dpi) {\n'
+    '        #google-logo {\n'
+    '          background: url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat 0% 0%/100% 100%;\n'
+    '          -moz-border-image: url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) 0;\n'
+    '        }\n'
+    '      }\n'
+    '      @media only screen and (-webkit-min-device-pixel-ratio: 2) {\n'
+    '        #google-logo {\n'
+    '          background: url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat;\n'
+    '          -webkit-background-size: 100% 100%;\n'
+    '        }\n'
+    '      }\n'
+    '      @media screen and (max-width: 772px) {\n'
+    '        body { background: none; margin-top: 0; max-width: none; padding-right: 0; }\n'
+    '      }\n'
+    '      @media (prefers-color-scheme: dark) {\n'
+    '        html { background: #202124; color: #bdc1c6; }\n'
+    '        body { color: #bdc1c6; }\n'
+    '        p { color: #bdc1c6; }\n'
+    '        b { color: #e8eaed; }\n'
+    '        ins { color: #9aa0a6; }\n'
+    '        #google-logo {\n'
+    '          background: url(//www.google.com/images/branding/googlelogo/2x/googlelogo_light_color_92x30dp.png) no-repeat 0% 0%/100% 100% !important;\n'
+    '          height: 49px;\n'
+    '          width: 150px;\n'
+    '        }\n'
+    '      }\n'
+    '    </style><main id="af-error-container" role="main"><a href=//www.google.com><span id="google-logo" aria-label=Google role=img></span></a><p><b>403.</b> <ins>That’s an error.</ins><p>Google Finance is currently not supported in your region.'
 )
 
 
@@ -1964,6 +2019,17 @@ def test_a_regional_refusal_is_not_an_empty_market():
                 "--market" in advice and "gl" in advice)
     ok &= check("a served page is not mistaken for it",
                 not pp.is_region_unavailable(_fx("markets_us")["html"]))
+    # This fixture is a real capture, not prose. Pinned because it WAS a
+    # reconstruction written from an audit report, and the reconstruction
+    # had the title wrong — Google's page says "Unavailable" where the
+    # rewrite said "Forbidden". A fixture nobody fetched can be plausible
+    # and still not be the page.
+    ok &= check("the fixture is Google's own error page, captured",
+                "Error 403 (Unavailable)" in REGION_403
+                and "googlelogo" in REGION_403)
+    ok &= check("...and carries no per-response or identifying material",
+                "NONCE-SCRUBBED" in REGION_403
+                and not re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", REGION_403))
 
     # Every engine must now keep the response and hand the status on. Two
     # of three can; selenium cannot, which is why the marker above is read

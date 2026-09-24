@@ -23,8 +23,16 @@ proxy, no account.**
 **No key, no account, no browser infrastructure — and no proxy, from a
 region Google serves Finance in.**
 
-That last clause is not hedging; it was added after a third-party audit on
-2026-09-24 ran this scraper from a region that Google refuses outright:
+That last clause is not hedging. A third-party audit hit it on 2026-09-24,
+and it was then measured directly through pinned residential exits — ten
+countries, one request each:
+
+| exit | result |
+|---|---|
+| **RU** | **HTTP 403, refused** (4 of 4: three quote fetches and the market page) |
+| US, DE, FR, HU, PL, CZ, AT | HTTP 200, served |
+
+What a refused region gets:
 
 ```
 403. That's an error.
@@ -32,11 +40,15 @@ Google Finance is currently not supported in your region.
 ```
 
 **`--market` does not get you past that**, and the distinction matters
-because the flag looks like it should. `gl` selects WHICH market's data you
-are served; the regional gate decides whether you are served at all, and it
-is checked first. From a refused region you need an exit in a supported one
-— a `--proxy`, or the `country-` segment of a Scraping Browser endpoint.
-From a supported region you need nothing.
+because the flag looks like it should. Verified from the refused exit:
+`?gl=US&hl=en` answered 403 with the same message, on both the quote route
+and the market page. `gl` selects WHICH market's data you are served; the
+regional gate decides whether you are served at all, and it is checked
+first.
+
+From a refused region you need an exit in a supported one — a `--proxy`, or
+the `country-` segment of a Scraping Browser endpoint. From a supported
+region you need nothing.
 
 The scraper now recognises that page as `region_unavailable` and reports
 exit 3 with advice naming the country axis, rather than the exit 4 it used

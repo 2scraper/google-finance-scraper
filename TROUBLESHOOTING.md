@@ -57,17 +57,23 @@ direction; it is the User-Agent.
 ## Exit 3 with "region unavailable"
 
 Google answered that Finance is **not served in your exit's country** — its
-own sentence, under HTTP 403. Reported by a third-party audit on 2026-09-24
-and not reproducible from this repo's own exits, which are all in supported
-regions.
+own sentence, under HTTP 403.
+
+Measured 2026-09-24 through pinned residential exits, one request per
+country: **RU refused** (4 of 4, quote route and market page alike), while
+US, DE, FR, HU, PL, CZ and AT were all served. The list is what ten exits
+showed on one day, not Google's policy — check your own exit before
+concluding anything about a country not on it.
 
 This is an access condition, and not the ordinary kind of block:
 
 * rotating to another address **in the same country** changes nothing;
 * no captcha applies — there is no challenge on that page;
-* **`--market` does not substitute for an exit.** It selects which market's
-  data you are served; the regional gate decides whether you are served at
-  all, and it is checked first.
+* **`--market` does not substitute for an exit.** Verified from the refused
+  exit: `?gl=US&hl=en` answered 403 with the same message, on both the
+  quote route and the market page. It selects which market's data you are
+  served; the regional gate decides whether you are served at all, and it
+  is checked first.
 
 Use an exit in a region Google serves Finance in: `--proxy`, or the
 `country-` segment of a Scraping Browser endpoint.
