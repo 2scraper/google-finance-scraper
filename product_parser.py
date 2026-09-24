@@ -69,7 +69,7 @@ from __future__ import annotations
 import html as _html
 import json
 import re
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlparse, urlencode, urlunparse
 
 from output_writer import Quote
@@ -1578,10 +1578,6 @@ def capped_by_site(html: Optional[str] = None) -> bool:
 
 
 def reachable_max(html: Optional[str] = None) -> int:
-    return 1
-
-
-def total_pages(html: Optional[str] = None) -> Optional[int]:
     return 1
 
 

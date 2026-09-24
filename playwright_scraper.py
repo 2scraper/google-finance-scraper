@@ -75,31 +75,25 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
-from urllib.parse import urlparse, urljoin, parse_qsl
+from urllib.parse import urljoin
 
 from playwright.sync_api import (sync_playwright, Error as PWError,
                                  TimeoutError as PWTimeout)
 
 from captcha_solver import (detect_recaptcha_v3, detect_recaptcha_in_page,
                             reconcile_detections, solve_recaptcha,
-                            CaptchaUnsolvable, INJECT_TOKEN_JS,
-                            RECAPTCHA_DISCOVERY_JS)
-from product_parser import (parse_products, parse_product_page,
-                            currency_from_page,
-                            pages_beyond_cap as parser_pages_beyond_cap,
+                            INJECT_TOKEN_JS)
+from product_parser import (parse_products, currency_from_page,
                             PAGE_CAP as parser_page_cap,
-                            SELECTORS, LOCALES,
-                            detect_bot_challenge, detect_block_marker,
-                            page_url, paginates_by_url, listing_kind,
-                            capped_by_site, reachable_max,
-                            site_host, is_supported_host, total_results,
-                            total_pages, search_header, unsupported_reason,
-                            market_metadata, CURRENCY, served_by_google,
+                            detect_bot_challenge, listing_kind,
+                            is_supported_host, total_results,
+                            search_header, unsupported_reason,
+                            served_by_google,
                             quote_url, markets_url, with_market,
                             canonical_url, symbol_from_url,
                             no_pagination_reason, MARKET_STRIPS, MOVER_LISTS,
                             market_from_url, QUOTE_PAGE_MODES,
-                            MARKET_PAGE_MODES, ALL_MODES)
+                            MARKET_PAGE_MODES)
 from output_writer import (dedupe_by_key, finish_run, EXIT_API_ERROR,
                            DEDUPE_KEY_BY_MODE,
                            SOURCE_DEFAULT)
@@ -149,31 +143,32 @@ class PageOutcome:
     # can tell an EMPTY page — a query that matched nothing — from a page
     # that failed. Both produce zero rows and they mean opposite things.
     state: Optional[str] = None
-    # What the query itself says it matched — `pagination.numFound`. A
-    # LIVING number: three fetches of one query inside a minute gave
-    # 3,053,682, 3,053,713 and 3,053,712. Recorded as the site's answer at
-    # this moment, never asserted against.
+    # How many rows the page itself published, as the site's own count
+    # where it states one. This site states no total for a larger set it is
+    # a slice of — every url serves exactly what it has — so this is a
+    # record of what arrived rather than a claim about what exists.
     total_available: Optional[int] = None
-    # The page's own declared language (`state.metadata.lang`), verbatim,
-    # for the sidecar. `?lang=en` changes the payload's `locale` to "en"
-    # while `lang` stays "ja" — so this is the honest record of what the
-    # site actually served, and it is why the README says the locale flag
-    # translates the chrome and not the data.
+    # The page's own declared language, verbatim, for the sidecar. `hl`
+    # changes the index and sector NAMES and leaves every symbol, price and
+    # venue byte-identical, which is why the README says the locale flag
+    # translates the labels and not the data.
     header: Optional[str] = None
-    # the site's own arithmetic about the query: total_results,
-    # pages_available, reachable_max, capped_by_site, pages_beyond_cap. In
-    # the sidecar because on this site "complete" and "exhaustive" are wildly
-    # different words and a status alone would be lying by omission (§21).
+    # The shape of this read, for the sidecar: total_results,
+    # pages_available, reachable_max, capped_by_site, paginates, market. On
+    # this site `capped_by_site` means the OPPOSITE of what it means in the
+    # family's paginated repos — one page IS everything the url publishes,
+    # so a one-page run is exhaustive rather than a sample — and `paginates:
+    # false` beside it is what says which.
     cap: Optional[dict] = None
     # Whether the SERVER served the page we asked for, read off
     # `pagination.start` rather than trusted from the request. False means
-    # the end of the listing: page 151 of a 150-page query answers 301 to
-    # page 1 and then HTTP 200 with 45 real products, and a `/category/` URL
-    # answers page 1 for any `?p=` at all. Both look like success.
+    # the end of a listing on the sites in this family that have one. This
+    # site has none — every url addresses exactly one thing — so it is
+    # always True here and the field stays for the shared outcome shape.
     served_requested_page: bool = True
-    # In --mode product, the merchant's own facts read off the item page.
-    # Stored as the small dict rather than by keeping the page's HTML around:
-    # a detail page is 244 KB in the browser.
+    # Kept for the family's shared outcome shape; this repo has no
+    # per-merchant facts to record, because it reads instruments rather than
+    # a marketplace's sellers.
     shop_facts: Optional[dict] = None
 
     @property
@@ -183,25 +178,21 @@ class PageOutcome:
 
 ITEM_LINK_SELECTOR = page_flow.READY_SELECTOR_LISTING
 
-# A price-coverage floor. One number, not a per-section map, because on
-# this site there is one answer: Google Finance names an instrument on every row, and a
-# price. Measured across 405 rows on 11 listing pages — keyword searches and
-# genre listings, pages 1 through 150 — `price` was non-null on 405 of 405.
+# A price-coverage floor. One number, not a per-mode map, because on this
+# site there is one answer: every row the parser emits carries a price, and
+# an index level counts as one.
 #
-# So the floor is high on purpose. A run that comes back with 80% priced has
-# not met an unusual page; it has a broken read, and the warning should say
-# so rather than shrug.
-#
-# `product` mode is not in the map: one page is one row, and a share of one
-# row is not a measurement.
-PRICE_FLOOR = {"listing": 95}
+# Measured 2026-09-22: 46 of 46 market rows priced, and every quote row in
+# every live run since. So the floor is high on purpose — a run that comes
+# back 80% priced has not met an unusual page, it has a broken read, and
+# the warning should say so rather than shrug.
+PRICE_FLOOR = {"markets": 95, "movers": 95}
 
-# A page holding less than this share of the fullest page in the same run is
-# reported as thin. This site's page size is steady — 45 products on 11 of
-# 11 captures, and the LAST page of a capped query is 45 too (page 150 came
-# back `start: 6705`, exactly 6750 - 45) — so the bar can sit closer than it
-# does on some sibling repos. Not tight, though: the last page of a query
-# with fewer than 6,750 total hits is legitimately short.
+# A unit holding less than this share of the fullest unit in the same run
+# is reported as thin. Loose on purpose here: the units are SYMBOLS rather
+# than pages of one listing, so they legitimately differ in size — a quote
+# is one row and a chart is a hundred — and comparing them against each
+# other says nothing. It stays because the shared loop reads it.
 THIN_PAGE_SHARE = 0.6
 
 
@@ -251,9 +242,18 @@ def _min_matches(args, html: str = "") -> int:
     return page_flow.min_matches(args.mode, page_flow.expected_cards(html))
 
 
-def _classify(page, html: str, status=None) -> str:
-    return page_flow.classify(html, status=status, url=page.url,
-                              mode=getattr(args, "mode", "quote"))
+def _classify(page, html: str, status=None, mode: str = "quote") -> str:
+    """Classify a response.
+
+    `mode` is a PARAMETER, not a reach for a module global. It used to read
+    `getattr(args, "mode", ...)`, and `args` is only bound at module level
+    inside the `if __name__ == "__main__":` block — so this worked when the
+    file was run as a script and raised NameError the moment anything
+    imported the module and called it. The offline suite's undefined-name
+    walk cannot see that: it pools every binding in a file, and `args` is
+    bound somewhere in this one.
+    """
+    return page_flow.classify(html, status=status, url=page.url, mode=mode)
 
 # Every readiness constant, every pagination selector and every state policy
 # lives in page_flow.py, with its measurement beside it. Nothing about WHAT
@@ -276,13 +276,11 @@ def _advertised_next_hrefs(page, page_num: int) -> List[str]:
     nothing better to reach for; you cannot order signals by durability when
     the site declines to publish the durable one.
 
-    Worth resolving anyway, and worth filtering: a genre landing page's own
-    next link points at a DIFFERENT HOST
-    (`www.google.com/finance/category/100356/` advertises
-    `search.google.com/finance/search/mall/-/100356/?p=2`), which is exactly what
-    `page_url` builds for it — so a comparison that insisted on the same
-    host would reject the site's own link and cost the run its
-    `--concurrency` while looking like a safety decision.
+    Worth resolving anyway, and worth filtering, on the sites in this family
+    that do paginate: a listing's own next link can point at a different
+    host, and a comparison that insisted on the same host would reject the
+    site's own link. This site publishes no such link at all, which is why
+    the guard below returns early.
     """
     # An EMPTY selector is not a selector, and handing one to
     # querySelectorAll is a DOMException rather than an empty result.
@@ -687,7 +685,12 @@ def _parse_for_mode(html: str, url: str, args, page_num: int = 1) -> List:
     market = args.market or market_from_url(url)
     rows = parse_products(html, url, page=page_num, mode=args.mode,
                           market=market)
-    if args.category and args.mode in MARKET_PAGE_MODES:
+    # `listing` is a column on the row class the market LIST modes share,
+    # and `earnings` is a market mode whose row class has no such column —
+    # so `--mode earnings --category gainers` was an AttributeError on a
+    # live run. Guarded here and refused in parse_args, because a filter
+    # that cannot apply should be told to the caller rather than crashed on.
+    if args.category and rows and hasattr(rows[0], "listing"):
         rows = [r for r in rows if r.listing == args.category]
     return rows
 
@@ -814,7 +817,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                 session.page.wait_for_timeout(1000)
 
         html = _content_when_settled(session.page) or ""
-        state = _classify(session.page, html, status)
+        state = _classify(session.page, html, status, args.mode)
 
         # "Not painted yet" is not a fault, and telling it apart from one is
         # what the first live search run of this engine got wrong. A CATEGORY
@@ -849,7 +852,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                 logger.info("The grid still had not painted after %.0fs "
                             "(%d match(es)).", wait_timeout / 1000, found)
             html = _content_when_settled(session.page) or html
-            state = _classify(session.page, html, status)
+            state = _classify(session.page, html, status, args.mode)
 
         # No interstitial-settling step here, and its absence is measured
         # rather than an omission. This site has no interstitial to settle: a
@@ -868,7 +871,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
             if handle_captcha_if_present(session.page, args):
                 session.page.wait_for_timeout(1000)
                 html = _content_when_settled(session.page) or html
-                state = _classify(session.page, html, status)
+                state = _classify(session.page, html, status, args.mode)
                 # The VERIFIED outcome, and the only one worth reporting: a
                 # "ready" task result is not evidence the token works. This
                 # line is what says whether the money bought anything.
@@ -1019,7 +1022,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         # `networkidle` wait ran to its full 60s timeout and then raised, on
         # a page that was complete in two seconds.
         #
-        # NO scroll follows either. The payload holds all 45 products in the
+        # NO scroll follows either. The payload holds every row in the
         # first response, so a scroll here would be latency bought for
         # nothing — and a wait that times out costs nothing at all, because
         # every column in the output comes out of that payload rather than
@@ -1115,7 +1118,12 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     # 1 without even redirecting. A run that trusted its own request would
     # re-collect page 1 for as long as it was asked to and report a
     # complete, entirely duplicate file (§23).
-    if args.mode == "listing":
+    if page_flow.pagination_is_addressable(url):
+        # Dead here — nothing paginates. It read
+        # `args.mode == "listing"`, and "listing" has never been
+        # a mode in this repo, so this branch and three like it
+        # had not executed once. One of the three was the
+        # price-coverage floor.
         # Compared against the page the fetched URL actually ASKS for, not
         # against the loop's counter — a run started on a URL that already
         # carries `?p=2` asks the site for page 2 while calling it page 1 of
@@ -1142,17 +1150,11 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     products = _parse_for_mode(html, session.page.url, args, page_num)
     logger.info("Parsed %d row(s) from page %d.", len(products), page_num)
 
-    # This site publishes no arithmetic about a larger result set — `numFound`,
-    # `pageSize` and `subset` — so page count and completeness are computed
-    # rather than guessed. Both numbers are recorded, because on this site
-    # they are wildly different and only having both makes the run honest:
-    # one measured query reported `numFound` 3,053,682 against a `subset` of
-    # 6,750, so a full run of it is complete AND a 0.2% sample (§21).
-    #
-    # `numFound` is also a LIVING number and is recorded as the site's
-    # answer at this moment rather than asserted against — three fetches of
-    # one query inside a minute reported 3,053,682, 3,053,713 and 3,053,712.
-    if args.mode == "listing" and page_num == 1:
+    # This site publishes no arithmetic about a larger result set, so there
+    # is nothing to compute completeness against and nothing to be a sample
+    # OF: every url serves exactly what it has. What goes in the sidecar is
+    # the shape of the read — see `cap` on the outcome.
+    if args.mode in MARKET_PAGE_MODES and page_num == 1:
         outcome.total_available = total_results(html)
         outcome.header = search_header(html)
         outcome.cap = page_flow.cap_summary(html)
@@ -1170,24 +1172,28 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                         "— carrying it to the rest of the run, since Google Finance "
                         "publishes that block on page 1 only.", stated)
         else:
-            logger.warning(
-                "Page 1 stated no currency. Google Finance normally declares "
-                "`priceCurrency` in this page's own JSON-LD; with no "
-                "statement to read, every row's `currency` will be null "
-                "rather than a guess.")
-        if capped_by_site(html):
-            logger.info(
-                "The site says this query matches %s products and will serve "
-                "%s of them (%d pages of %d). A run that reaches page %d is "
-                "COMPLETE as far as the site is concerned and is %.2f%% of "
-                "what it says it matched — narrow the query with the site's "
-                "own filters to reach the rest.",
-                f"{outcome.total_available:,}", f"{reachable_max(html):,}",
-                total_pages(html) or 0, page_flow.PAGE_SIZE,
-                total_pages(html) or 0,
-                100.0 * (reachable_max(html) or 0) / outcome.total_available)
+            # Not a warning. Every row carries the currency its own record
+            # states, so a page-level statement is a convenience rather than
+            # the source — and an index has no currency at all, which is a
+            # fact about indices and not a failed read. The donor site
+            # published one block per page and needed the warning; this one
+            # does not, and shouting about it on every market run is how a
+            # reader learns to ignore warnings.
+            logger.debug("Page 1 stated no page-level currency; every row "
+                         "carries its own.")
+        # NO cap-percentage log. On the family's paginated sites this said "the
+        # site matched N and will serve M of them"; here every url serves exactly
+        # what it has, `total_available` is the row count itself, and the
+        # division was by zero the moment this branch stopped being dead. The
+        # sidecar carries the shape of the read instead.
 
-    if products and args.mode == "listing":
+    # Only where the mode's row class HAS a price. `earnings` is a market
+    # mode and an EarningsEvent has no `price` column, so reviving this
+    # branch — it had been dead behind a mode named "listing" — turned it
+    # into an AttributeError on the first live earnings run. A market mode
+    # is not automatically a priced one.
+    if (products and args.mode in MARKET_PAGE_MODES
+            and hasattr(products[0], "price")):
         priced = sum(1 for p in products if p.price is not None)
         share = 100.0 * priced / len(products)
         floor = PRICE_FLOOR.get(args.mode, 0)
@@ -1219,18 +1225,14 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         # parser. The payload has no was-price field at all; the detail
         # route does, gated on the site's own
         # `doublePrice.referencePriceVerified` flag.
-        rated = sum(1 for p in products if p.rating is not None)
-        logger.info(
-            "Rating coverage on page %d: %d/%d (%.0f%%). A null here means "
-            "the site has no figure — it writes that as "
-            "`{score: 0, numReviews: 0}` and both columns are nulled "
-            "together, on 28 of 405 measured rows.",
-            page_num, rated, len(products), 100.0 * rated / len(products))
-        if any(p.original_price is not None for p in products):
-            logger.info(
-                "This page carries a verified was-price, which the listing "
-                "payload was measured never to publish — worth a look, the "
-                "site may have added the field.")
+        # NO rating or was-price coverage. Both were the donor site's —
+        # `rating` and `original_price` are not columns on any row class
+        # here — and both sat inside a branch keyed on a mode named
+        # "listing" that this repo has never had, so they had never
+        # executed. Un-deadening that branch to reach the
+        # price-coverage floor beside them turned them into an
+        # AttributeError on the first live run, which is how they were
+        # found.
 
     if not products:
         debug_html = f"{args.out}_page{page_num}_debug.html"
@@ -1555,7 +1557,7 @@ def scrape(args) -> int:
     # where a short page hides.
     #
     # NOT "pages x rows-per-page". Google Finance's page size is steady at 45 on 11
-    # of 11 captures — including page 150, the last page of a capped query —
+    # of 11 captures — every mode, every market measured —
     # but the last page of a query with fewer than 6,750 total hits is
     # legitimately short, so multiplying the fullest page by the page count
     # would warn on healthy runs, and a threshold that fires on every
@@ -1568,7 +1570,7 @@ def scrape(args) -> int:
     # accounts for.
     total_available = next((o.total_available for o in outcomes
                             if o.total_available is not None), None)
-    if args.mode == "listing" and all_rows:
+    if args.mode in MARKET_PAGE_MODES and all_rows:
         counts = [(o.page_num, len(o.products)) for o in outcomes if o.ok]
         fullest = max((n for _, n in counts), default=0)
         thin = [(p, n) for p, n in counts
@@ -1589,28 +1591,14 @@ def scrape(args) -> int:
             logger.info("This listing holds %d product(s) in total; this run "
                         "took %d (%.1f%%).", total_available, len(all_rows),
                         100.0 * len(all_rows) / total_available)
-            # The pages the CATALOGUE has that the site will NOT address. A
-            # run that stops at the cap is complete as far as the site is
-            # concerned and truncated as far as the catalogue is, and only
-            # saying so lets a consumer tell the two apart. Computed from the
-            # total the payload already stated rather than from another fetch.
-            # `fullest` is this run's own observed page size, which is what
-            # the site actually served rather than a number hardcoded here.
-            beyond = (max(0, -(-total_available // fullest) - parser_page_cap)
-                      if fullest else 0)
-            if beyond:
-                logger.warning(
-                    "This query is %d page(s) deeper than the site will "
-                    "address. It caps every query at 6,750 results — 150 "
-                    "pages of 45 — however many it matched, and it states "
-                    "that itself as `pagination.subset`. One measured query "
-                    "reported 3,053,682 matches against that same 6,750, so "
-                    "99.8%% of it cannot be reached through pagination at "
-                    "all, and a request past page 150 does not fail: it "
-                    "redirects to page 1 and serves it with HTTP 200. "
-                    "Narrow the query with the site's own filters — genre, "
-                    "price band, shop, tag — and run each slice.",
-                    beyond)
+            # NO cap warning here, and its absence is a decision. On the
+            # family's paginated sites this warned that a query held more
+            # pages than the site would address. This site addresses
+            # exactly one page per url and `--pages > 1` is refused, so
+            # the figure was always zero and the warning could never
+            # fire — while its text still described the donor site's
+            # 6,750-result cap. Dead code that looks load-bearing is
+            # worse than none.
 
     ok_pages = [o for o in outcomes if o.ok]
     failed_pages = [o.page_num for o in outcomes if not o.ok]
@@ -1619,14 +1607,11 @@ def scrape(args) -> int:
 
     # One-per-run context, in the sidecar rather than repeated down a column.
     #
-    # In --mode product that is the merchant's own id, name and tax rate off
-    # the item page. In --mode listing it is the site's own arithmetic about
-    # the query, and on this site that is not optional decoration: a
-    # `status: complete` run of a query the site caps at 6,750 of 3,053,682
-    # matches is complete and is a 0.2% sample, and a sidecar that said only
-    # "complete" would be lying by omission (§21). It also gives
-    # `diff_runs.py` the third meaning of `removed` — not delisted, not
-    # un-fetched, but outside this run's slice of a capped result set.
+    # Kept for the family's shared shape. This repo records no per-seller
+    # facts, and no cap arithmetic either: the sidecar carries the shape of
+    # the read instead — which market was asked for, that the url does not
+    # paginate, and how many symbols were requested against how many came
+    # back.
     # Always recorded, never conditional. `market` is what makes two runs
     # comparable or not: the root page's lists are geo-selected, so a gl=US
     # run and a gl=DE run are two SAMPLES rather than a before and an after,
@@ -1934,7 +1919,7 @@ def parse_args():
     # rather than as a sentence.
     p.add_argument("--headful", dest="headless", action="store_false",
                    help="Run with a real browser window. Not needed for the "
-                        "routes this scraper reads — search, genre and item "
+                        "routes this scraper reads — quote and market pages "
                         "pages were all served headless in testing. Worth "
                         "knowing that ranking.google.com/finance, which this repo "
                         "does NOT read, answered 403 headless and 200 "
@@ -1956,6 +1941,9 @@ def parse_args():
                     "JP...); got %r." % (args.market,))
 
     if args.category:
+        if args.mode == "earnings":
+            p.error("--mode earnings has no strips to filter: its rows are "
+                    "announcements, not entries in a list. Drop --category.")
         allowed = MARKET_STRIPS if args.mode == "markets" else MOVER_LISTS
         if args.mode in QUOTE_PAGE_MODES:
             logger.warning("--category is ignored in --mode %s, which "

@@ -61,13 +61,11 @@ No other captcha vendor is integrated (per spec: no competitors).
 
 from __future__ import annotations
 
-import base64
 import re
 import time
 import logging
 from dataclasses import dataclass
-from typing import Optional, Tuple
-from urllib.parse import urljoin, urlparse, urlunparse, parse_qsl, urlencode
+from typing import Optional
 
 import requests
 

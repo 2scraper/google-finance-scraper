@@ -78,17 +78,12 @@ from __future__ import annotations
 
 import logging
 from typing import Callable, Dict, Iterable, List, Optional, Union
-from urllib.parse import urljoin, urlparse, urlunparse
 
-from product_parser import (PAGE_CAP, canonical_url, capped_by_site,
-                            detect_block_marker, detect_bot_challenge,
-                            detect_page_state, is_not_found,
+from product_parser import (canonical_url, detect_block_marker, detect_page_state, is_not_found,
                             is_region_unavailable,
                             is_unsupported_client, listing_kind,
-                            market_from_url, market_metadata,
-                            no_pagination_reason, pages_beyond_cap,
-                            paginates_by_url, reachable_max, served_by_google,
-                            symbol_from_url, total_pages, total_results,
+                            market_metadata,
+                            no_pagination_reason, paginates_by_url, total_results,
                             unsupported_reason)
 
 logger = logging.getLogger(__name__)

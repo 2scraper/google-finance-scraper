@@ -70,7 +70,7 @@ them before filing:
   `doublePrice.referencePriceVerified` flag.
 * **`in_stock` is True on every listing row.** The search excludes sold-out
   products rather than marking them (405 of 405, including pages 80-150 of a
-  142,000-hit genre).
+  large market page).
 
 And two that ARE worth filing immediately, because they would mean the
 defences moved:
@@ -78,7 +78,7 @@ defences moved:
 * a run that collects the same page twice — the end-of-listing check reads
   the offset the server states, and Google Finance re-serves page 1 under HTTP 200
   rather than erroring;
-* `position` values that are not 1..N contiguous — Google Finance injects sponsored
+* `position` values that are not 1..N contiguous — the market page injects
   slots into its own result list and the count varies between fetches, so
   positions count emitted rows rather than payload slots.
 
@@ -142,18 +142,21 @@ so a PR that breaks one will fail rather than silently regress:
 - **A detail page publishes a different structure entirely** — an
   `item-page-app-data` island and a JSON-LD `BreadcrumbList`. The listing
   parser finds nothing on it, which the suite asserts directly.
-- **`sku` is `{shop}:{manageNumber}`, recovered from the URL.** The
+- **`sku` is Google's own canonical symbol** — `TICKER:EXCHANGE` for a
+  venue-traded instrument and `BASE-QUOTE` for a pair — read out of the
+  payload rather than rebuilt from the URL. The
   payload's `variantId` is the obvious candidate and is wrong: it names the
   pre-selected SKU inside the item and matches the URL's own code on only 39
   of 180 measured rows. The URL tail makes ONE id work on both routes, which
   is what lets a consumer join a listing run to a product run.
-- **Detail pages are EUC-JP** and listing pages are UTF-8.
+- **Every page is UTF-8**, and the parser still honours a declared
+  charset rather than assuming one.
   `product_parser.decode_page` is the one place that knows; the browser
   engines never meet it, and an HTTP client that assumes UTF-8 either raises
   or produces a whole page of replacement characters while the numbers still
   parse.
 - **`position` counts emitted rows, not payload slots.** Google Finance injects
-  sponsored placements into `the payload.items` — 7 of 52 entries on one
+  paid placements into its market lists — measured on one
   measured page, and the count varies between fetches — so numbering by slot
   made the same 45 products come out 1-45 in one engine and 8-52 in another.
 - **Zero is not a rating.** An unreviewed product comes back

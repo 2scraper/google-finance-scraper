@@ -62,8 +62,11 @@ from typing import Optional
 
 import requests
 
-from product_parser import (parse_products, detect_bot_challenge,
-                            detect_page_state, BOT_CHALLENGE_MARKERS)
+from product_parser import (parse_products, quote_url, markets_url,
+                            with_market, canonical_url,
+                            market_from_url, QUOTE_PAGE_MODES,
+                            MARKET_PAGE_MODES, detect_bot_challenge,
+                            detect_page_state)
 from output_writer import save
 import env_config
 
@@ -294,7 +297,11 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
                      "puppeteer_scraper.py directly.")
         return 3
 
-    products = parse_products(html, args.url, category=args.category)
+    market = args.market or market_from_url(args.url)
+    products = parse_products(html, args.url, page=1, mode=args.mode,
+                              market=market)
+    if args.category and args.mode in MARKET_PAGE_MODES:
+        products = [r for r in products if r.listing == args.category]
     logger.info("Parsed %d products.", len(products))
 
     if not products:
@@ -324,11 +331,24 @@ def parse_args():
                    help="2captcha.com API key (sent as a Bearer token). "
                         "Defaults to $TWOCAPTCHA_KEY, which is the safer way to pass it.")
     p.add_argument("--url", default=None,
-                   help="A Google Finance listing URL — a keyword search "
-                        "(/p/<cat>/<sub>/<subsub>) is the only kind this path "
-                        "can read at all, since a search grid has no "
-                        "server-rendered container. Required, unless "
-                        "GOOGLE_FINANCE_URL is set in the environment or in .env.")
+                   help="A Google Finance URL. Optional: --symbols builds "
+                        "quote URLs for you, and the market modes default "
+                        "to the site's root. GOOGLE_FINANCE_URL works too.")
+    p.add_argument("--symbols", default=None, metavar="SYM[,SYM...]",
+                   help="Comma-separated instruments for the instrument "
+                        "modes — GOOGL:NASDAQ,BMW:ETR,EUR-USD. One request "
+                        "per symbol, which is what this site's unit of work "
+                        "is.")
+    p.add_argument("--market", default=None, metavar="CC",
+                   help="Two-letter market, sent as Google's own `gl`. It "
+                        "selects WHICH market's data you get; it does not "
+                        "get you past a regional refusal.")
+    p.add_argument("--mode",
+                   choices=["quote", "markets", "movers", "financials",
+                            "analysts", "earnings", "chart"],
+                   default="quote",
+                   help="The same seven modes the browser engines take, "
+                        "reading the same payload through the same parser.")
     p.add_argument("--category", default=None, help="Label to tag output rows with. Defaults to the category segment of the URL, so the column is never empty just because the flag was omitted.")
     p.add_argument("--format", choices=["json", "csv", "both"], default="both")
     p.add_argument("--out", default="google_finance_scraperapi", help="Output file prefix")
@@ -365,9 +385,30 @@ def parse_args():
         "GOOGLE_FINANCE_CDP_ENDPOINT": "cdp_url",
         "GOOGLE_FINANCE_URL": "url",
     })
-    if not args.url:
-        p.error("no --url given, and GOOGLE_FINANCE_URL is not set in the environment "
-                "or in .env.")
+    args.market = (args.market or "").strip().upper() or None
+    language = (getattr(args, "locale", None) or "en").split("-")[0]
+    symbols = [x.strip() for x in (args.symbols or "").split(",") if x.strip()]
+    if symbols and args.url:
+        p.error("pass --symbols or --url, not both.")
+    if args.mode in QUOTE_PAGE_MODES:
+        if symbols:
+            args._symbol_urls = [quote_url(x, args.market, language)
+                                 for x in symbols]
+            args.url = args._symbol_urls[0]
+        elif args.url:
+            args.url = with_market(canonical_url(args.url), args.market,
+                                   language)
+            args._symbol_urls = [args.url]
+        else:
+            p.error("--mode %s needs --symbols or an instrument --url, and "
+                    "GOOGLE_FINANCE_URL is not set." % (args.mode,))
+    else:
+        if symbols:
+            p.error("--symbols names instruments and --mode %s reads the "
+                    "market page." % (args.mode,))
+        args.url = (with_market(canonical_url(args.url), args.market, language)
+                    if args.url else markets_url(args.market, language))
+        args._symbol_urls = [args.url]
     return args
 
 

@@ -40,7 +40,6 @@ import tempfile
 import textwrap
 from contextlib import redirect_stdout, redirect_stderr
 
-import output_writer
 import page_flow
 import product_parser as pp
 from output_writer import (Quote, Product, Financial, AnalystRating,
@@ -1625,6 +1624,114 @@ REGION_403 = (
 )
 
 
+def test_no_engine_reads_a_column_that_does_not_exist():
+    group("no engine reads a column no row class has")
+    ok = True
+    # Found the hard way. Four branches in each engine were keyed on a mode
+    # named "listing", which this repo has never had, so they had never
+    # executed — and inside them sat the donor site's coverage reporting for
+    # `rating` and `original_price`, neither of which is a column here. One
+    # of those same branches held the PRICE-COVERAGE FLOOR, which therefore
+    # had never run either.
+    #
+    # Un-deadening the branch to get the floor back turned the other two
+    # into AttributeError on the first live run. Offline, nothing saw them:
+    # they parse, they import, --help works, and the undefined-name walk
+    # cannot help because `p` is a real loop variable.
+    known = set()
+    for cls in (Quote, Financial, AnalystRating, EarningsEvent, ChartPoint):
+        known |= {f.name for f in dataclasses.fields(cls)}
+    ok &= check("the row classes were read (%d fields)" % len(known),
+                len(known) > 50)
+    # Names that are obviously not a row: argparse builders, HTTP responses.
+    NOT_A_ROW = {"add_argument", "add_mutually_exclusive_group", "parse_args",
+                 "error", "raise_for_status", "json", "status_code", "text",
+                 "content", "headers", "get", "keys", "items", "values",
+                 "update", "pop", "replace", "endswith", "startswith",
+                 "returncode", "stdout", "stderr", "url"}
+    problems = []
+    for eng in ENGINES:
+        path = os.path.join(REPO_ROOT, eng + ".py")
+        if not os.path.exists(path):
+            continue
+        tree = ast.parse(open(path, encoding="utf-8").read(), eng)
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Attribute)
+                    and isinstance(n.value, ast.Name)
+                    and n.value.id in ("p", "r", "row", "product")
+                    and not n.attr.startswith("_")
+                    and n.attr not in known
+                    and n.attr not in NOT_A_ROW):
+                problems.append("%s:%d %s.%s" % (eng, n.lineno, n.value.id,
+                                                 n.attr))
+    ok &= check("no engine reads an unknown row column%s"
+                % ("" if not problems else " (%s)" % problems[:4]), not problems)
+
+
+    # A column that exists on SOME row class is not a column every mode has.
+    # The price-coverage branch reads `p.price`, which Quote has and
+    # EarningsEvent does not — and `earnings` is a market mode, so reviving
+    # that branch turned it into an AttributeError on the first live
+    # earnings run. The check above cannot see it, because `price` is a
+    # known field. So: any attribute read inside a branch gated on
+    # MARKET_PAGE_MODES must exist on EVERY market mode's row class, or the
+    # branch must guard it with hasattr.
+    market_classes = [ROW_CLASS_BY_MODE[m] for m in pp.MARKET_PAGE_MODES]
+    common = set.intersection(*[{f.name for f in dataclasses.fields(c)}
+                                for c in market_classes])
+    unsafe = []
+    for eng in ENGINES:
+        path = os.path.join(REPO_ROOT, eng + ".py")
+        if not os.path.exists(path):
+            continue
+        text = open(path, encoding="utf-8").read()
+        tree = ast.parse(text, eng)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            test = ast.unparse(node.test)
+            if "MARKET_PAGE_MODES" not in test:
+                continue
+            guarded = "hasattr" in test
+            for n in ast.walk(node):
+                if (isinstance(n, ast.Attribute)
+                        and isinstance(n.value, ast.Name)
+                        and n.value.id in ("p", "r", "row")
+                        and not n.attr.startswith("_")
+                        and n.attr in known
+                        and n.attr not in common
+                        and not guarded):
+                    unsafe.append("%s:%d p.%s" % (eng, n.lineno, n.attr))
+    ok &= check("no market-mode branch reads a column only some of those "
+                "modes have%s"
+                % ("" if not unsafe else " (%s)" % unsafe[:4]), not unsafe)
+    ok &= check("the market modes do share columns to compare against (%d)"
+                % len(common), len(common) >= 4)
+
+    # And no branch keyed on a mode that does not exist — the thing that hid
+    # all of it.
+    for eng in ENGINES:
+        path = os.path.join(REPO_ROOT, eng + ".py")
+        if not os.path.exists(path):
+            continue
+        text = open(path, encoding="utf-8").read()
+        tree = ast.parse(text, eng)
+        ghosts = set()
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Compare)
+                    and isinstance(n.left, ast.Attribute)
+                    and n.left.attr == "mode"
+                    and n.comparators
+                    and isinstance(n.comparators[0], ast.Constant)
+                    and isinstance(n.comparators[0].value, str)
+                    and n.comparators[0].value not in pp.ALL_MODES):
+                ghosts.add(n.comparators[0].value)
+        ok &= check("%s compares args.mode only against real modes%s"
+                    % (eng, "" if not ghosts else " (ghost: %s)" % sorted(ghosts)),
+                    not ghosts)
+    return ok
+
+
 def test_every_tracked_field_is_actually_compared():
     group("one mutation per comparable field, per mode")
     ok = True
@@ -2015,7 +2122,6 @@ def test_no_public_function_without_a_consumer():
     # Consumers are counted ANYWHERE, including the defining module, because
     # `parse_products` routing to `parse_financials` is a real consumer even
     # though nothing outside product_parser.py names it.
-    import io as _io
     sources = {}
     for path in glob.glob(os.path.join(REPO_ROOT, "*.py")) + \
             glob.glob(os.path.join(REPO_ROOT, ".github", "*.py")):
@@ -2296,6 +2402,7 @@ def main() -> int:
     ok &= test_dockerfile_copies_what_it_imports()
     ok &= test_sample_output_matches_the_schema()
     ok &= test_ci_checks_is_wired_up()
+    ok &= test_no_engine_reads_a_column_that_does_not_exist()
     ok &= test_every_tracked_field_is_actually_compared()
     ok &= test_one_bad_symbol_does_not_end_the_queue(skips)
     ok &= test_a_regional_refusal_is_not_an_empty_market()
