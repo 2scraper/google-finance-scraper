@@ -20,9 +20,29 @@ proxy, no account.**
 
 ## What you actually need
 
-**Nothing.** No key, no proxy, no account, no browser infrastructure.
+**No key, no account, no browser infrastructure — and no proxy, from a
+region Google serves Finance in.**
 
-That is measured, not a pitch. From one datacentre address (Hetzner,
+That last clause is not hedging; it was added after a third-party audit on
+2026-09-24 ran this scraper from a region that Google refuses outright:
+
+```
+403. That's an error.
+Google Finance is currently not supported in your region.
+```
+
+**`--market` does not get you past that**, and the distinction matters
+because the flag looks like it should. `gl` selects WHICH market's data you
+are served; the regional gate decides whether you are served at all, and it
+is checked first. From a refused region you need an exit in a supported one
+— a `--proxy`, or the `country-` segment of a Scraping Browser endpoint.
+From a supported region you need nothing.
+
+The scraper now recognises that page as `region_unavailable` and reports
+exit 3 with advice naming the country axis, rather than the exit 4 it used
+to report, which means "the page loaded and the market is empty".
+
+Everything below was measured from one datacentre address (Hetzner,
 Helsinki, AS24940) on **2026-09-22**, with no credential of any kind:
 
 | command | result |
@@ -35,18 +55,20 @@ Helsinki, AS24940) on **2026-09-22**, with no credential of any kind:
 | `--mode chart --symbols GOOGL:NASDAQ` | **99 bars** — 79 intraday, 20 daily |
 | `--mode earnings --market US` | **5 upcoming announcements** |
 
-The reason this site is unusually open is worth stating plainly, because it
-changes what the paid products are for: **on Google Finance the market is a
-query parameter, not a property of your exit address.** `--market US` from a
-Finnish address returns NASDAQ movers and CBOE sector indices; `--market DE`
-returns ETR and STOXX; with no `--market` at all you get whatever market
-your exit IP sits in. Measured, one fetch each, same address.
+Within a supported region, the site is unusually open, and the reason is
+worth stating plainly because it changes what the paid products are for:
+**which market you read is a query parameter, not a property of your exit
+address.** `--market US` from a Finnish address returns NASDAQ movers and
+CBOE sector indices; `--market DE` returns ETR and STOXX; with no `--market`
+at all you get whatever market your exit IP sits in. Measured, one fetch
+each, same address.
 
-So the usual reason to buy an exit — *"I need to see the American market"* —
-does not apply here. What the 2Captcha products still buy:
+So one usual reason to buy an exit — *"I need to see the American market"* —
+does not apply. The other one does: if your own region is refused, an exit
+is the only way in. What the 2Captcha products buy:
 
-* **proxies** — volume. Spreading a large run across exits is what keeps any
-  one address from being scored.
+* **proxies** — access from a refused region, and volume. Spreading a large
+  run across exits is what keeps any one address from being scored.
 * the **Scraping Browser API** — no local browser to install or keep
   patched, and a persistent profile.
 * **captcha solving** — see [Captchas](#captchas). None was met in testing;

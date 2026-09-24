@@ -548,6 +548,15 @@ def _next_page_candidates(session, page_num: int) -> List[str]:
     get_attribute("href"). Kept explicit because the two engines differ here
     and a hand-rolled join got it wrong once.
     """
+    # An EMPTY selector is not a selector, and handing one to
+    # querySelectorAll is a DOMException rather than an empty result.
+    # `NEXT_PAGE_SELECTOR` is deliberately "" on this site because there is
+    # no next page to advertise, so this scan has nothing to do — and the
+    # crash only surfaced once the symbol-queue fix let a run continue past
+    # a row-less symbol and reach this line at all.
+    if not page_flow.next_page_selector(page_num):
+        return []
+
     bridge, page = session.bridge, session.page
     hrefs = bridge.run(page.evaluate(
         "(selector) => Array.from(document.querySelectorAll(selector))"
@@ -643,10 +652,17 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         block_attempt += 1
         logger.info("Fetching page %d/%d: %s", page_num, args.pages, url)
         load_failed = False
+        # The RESPONSE, not just the navigation — see the note in
+        # playwright_scraper.py. Without the status a regional 403 reads as
+        # `unknown` and ends the run as exit 4, which means "the page loaded
+        # and there was nothing in it".
+        status = None
         for attempt in range(1, args.retries + 1):
             try:
-                bridge.run(page.goto(url, {"waitUntil": "domcontentloaded",
-                                           "timeout": 60000}))
+                response = bridge.run(
+                    page.goto(url, {"waitUntil": "domcontentloaded",
+                                    "timeout": 60000}))
+                status = getattr(response, "status", None) if response else None
                 load_failed = False
                 break
             except Exception as e:  # noqa: BLE001 — pyppeteer raises many types
@@ -691,7 +707,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                 time.sleep(1)
 
         html = _content(session) or ""
-        state = page_flow.classify(html, url=page.url)
+        state = page_flow.classify(html, status=status, url=page.url)
 
         # "Not painted yet" is not a fault, and on this site it is also
         # not the usual case: a listing page carries all 45 of its products
@@ -714,7 +730,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                 logger.info("The grid still had not painted after %.0fs "
                             "(%d match(es)).", wait_timeout / 1000, found)
             html = _content(session) or html
-            state = page_flow.classify(html, url=page.url)
+            state = page_flow.classify(html, status=status, url=page.url)
 
         # No interstitial-settling step, and its absence is measured rather
         # than an omission: this site has no interstitial. A refused request
@@ -731,7 +747,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
             if handle_captcha_if_present(session, args):
                 time.sleep(1)
                 html = _content(session) or html
-                state = page_flow.classify(html, url=page.url)
+                state = page_flow.classify(html, status=status, url=page.url)
                 if state == "content":
                     logger.info("The solve was accepted — page %d is content "
                                 "now.", page_num)
@@ -1115,12 +1131,19 @@ def scrape(args) -> int:
                 if not outcome.served_requested_page:
                     stop_reason = "end_of_listing"
                     break
-                if not fresh_count:
+                if not fresh_count and page_flow.empty_unit_ends_the_run(url):
                     logger.info("Page %d added no rows not already seen — "
                                 "treating that as the end of the listing.",
                                 page_num)
                     stop_reason = "no_new_products"
                     break
+                if not fresh_count:
+                    # A row-less SYMBOL ends nothing: the remaining symbols
+                    # are independent of it, and treating this as the end of
+                    # a listing stopped the queue on the first typo. See
+                    # page_flow.empty_unit_ends_the_run for the reproduction.
+                    logger.info("%s returned no rows; the remaining symbols "
+                                "are unaffected.", url)
 
                 if page_num < args.pages:
                     nxt = _next_page_candidates(session, page_num)
@@ -1243,6 +1266,30 @@ def scrape(args) -> int:
     headers = {o.page_num: o.header for o in outcomes if o.header}
     if headers:
         extra["page_language"] = headers
+
+    # What happened to each unit of work, recorded rather than left in the
+    # log. A run of ten symbols with three typos returns seven rows, and
+    # without these three numbers the only way to notice is to count the
+    # rows yourself and know what you asked for.
+    #
+    # `not_found` is deliberately NOT a failure: Google answered, and the
+    # answer was "there is no such instrument". A run whose only shortfall
+    # is misspelt symbols is `complete` and exits 0 — the symbols that
+    # FAILED (a load error, a block, a regional refusal) are the ones that
+    # make it partial, and those already land in `pages_failed`.
+    _states = [getattr(o, "state", None) for o in outcomes]
+    extra.update({
+        "symbols_requested": len(getattr(args, "_symbol_urls", []) or []),
+        "symbols_ok": sum(1 for o in outcomes if o.ok and o.products),
+        "symbols_not_found": sum(1 for s in _states if s == "not_found"),
+        "symbols_failed": sum(1 for o in outcomes if not o.ok),
+    })
+    _missing = extra["symbols_not_found"]
+    if _missing:
+        logger.warning(
+            "%d of %d symbol(s) do not exist on Google Finance; the run is "
+            "complete and those rows are simply absent. The sidecar records "
+            "the counts.", _missing, extra["symbols_requested"])
 
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,

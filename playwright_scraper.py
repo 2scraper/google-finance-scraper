@@ -284,6 +284,15 @@ def _advertised_next_hrefs(page, page_num: int) -> List[str]:
     host would reject the site's own link and cost the run its
     `--concurrency` while looking like a safety decision.
     """
+    # An EMPTY selector is not a selector, and handing one to
+    # querySelectorAll is a DOMException rather than an empty result.
+    # `NEXT_PAGE_SELECTOR` is deliberately "" on this site because there is
+    # no next page to advertise, so this scan has nothing to do — and the
+    # crash only surfaced once the symbol-queue fix let a run continue past
+    # a row-less symbol and reach this line at all.
+    if not page_flow.next_page_selector(page_num):
+        return []
+
     selector = page_flow.next_page_selector(page_num)
     return [el.get_attribute("href") for el in page.query_selector_all(selector)]
 
@@ -744,9 +753,20 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         # Retry a navigation timeout rather than ending the run on it. One
         # network flap on page 12 of 50 should not break the loop.
         load_failed, exit_failed = False, None
+        # The RESPONSE, not just the navigation. Discarding it threw away the
+        # HTTP status, and the status is the only thing that separates two
+        # very different answers on this site: Google serves a regional
+        # refusal as 403 with its own sentence, and without the status that
+        # page classified as `unknown`, was retried, and ended as exit 4 —
+        # the code that means "the page loaded and the market is empty".
+        # A pipeline reading that cannot tell a country it may not scrape
+        # from a market with no data in it.
+        status = None
         for attempt in range(1, args.retries + 1):
             try:
-                session.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                response = session.page.goto(url, wait_until="domcontentloaded",
+                                             timeout=60000)
+                status = response.status if response is not None else None
                 load_failed = False
                 break
             except (PWTimeout, PWError) as e:
@@ -794,7 +814,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                 session.page.wait_for_timeout(1000)
 
         html = _content_when_settled(session.page) or ""
-        state = _classify(session.page, html)
+        state = _classify(session.page, html, status)
 
         # "Not painted yet" is not a fault, and telling it apart from one is
         # what the first live search run of this engine got wrong. A CATEGORY
@@ -829,7 +849,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                 logger.info("The grid still had not painted after %.0fs "
                             "(%d match(es)).", wait_timeout / 1000, found)
             html = _content_when_settled(session.page) or html
-            state = _classify(session.page, html)
+            state = _classify(session.page, html, status)
 
         # No interstitial-settling step here, and its absence is measured
         # rather than an omission. This site has no interstitial to settle: a
@@ -848,7 +868,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
             if handle_captcha_if_present(session.page, args):
                 session.page.wait_for_timeout(1000)
                 html = _content_when_settled(session.page) or html
-                state = _classify(session.page, html)
+                state = _classify(session.page, html, status)
                 # The VERIFIED outcome, and the only one worth reporting: a
                 # "ready" task result is not evidence the token works. This
                 # line is what says whether the money bought anything.
@@ -1290,11 +1310,19 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                                                   page_num, url)
                         with results_lock:
                             results.append(outcome)
-                        if outcome.ok and not outcome.products:
+                        if (outcome.ok and not outcome.products
+                                and page_flow.empty_unit_ends_the_run(url)):
                             logger.info("[%s] page %d returned no rows — "
                                         "treating that as the end of the listing "
                                         "and stopping dispatch.", name, page_num)
                             exhausted.set()
+                        elif outcome.ok and not outcome.products:
+                            # A row-less SYMBOL is not the end of anything:
+                            # the others are independent of it. See
+                            # page_flow.empty_unit_ends_the_run.
+                            logger.info("[%s] %s returned no rows; the "
+                                        "remaining symbols are unaffected.",
+                                        name, url)
                 finally:
                     session.close()
         except Exception:  # noqa: BLE001 — a dead worker must not hang the run
@@ -1421,7 +1449,11 @@ def scrape(args) -> int:
                     stop_reason = ("page_load_timeout" if worst.load_failed
                                    else f"blocked_{worst.blocked_by}")
                     blocked = any(o.blocked_by for o in rest)
-                elif exhausted:
+                elif exhausted and page_flow.empty_unit_ends_the_run(args.url):
+                    # Unreachable on this site, because the dispatcher only
+                    # sets `exhausted` when the same policy allows it —
+                    # gated here as well so the source carries no terminator
+                    # that a reader has to trace two hops to disarm.
                     stop_reason = "no_new_products"
                 elif unattempted:
                     # Should not happen without a failure or exhaustion,
@@ -1476,12 +1508,19 @@ def scrape(args) -> int:
                     # further to fetch, and this is the honest terminating
                     # condition: a property of the DATA, not of a CSS
                     # selector that may have been renamed.
-                    if not fresh_count:
+                    if not fresh_count and page_flow.empty_unit_ends_the_run(url):
                         logger.info("Page %d added no rows not already seen "
                                     "— treating that as the end of the "
                                     "listing.", page_num)
                         stop_reason = "no_new_products"
                         break
+                    if not fresh_count:
+                        # A row-less SYMBOL ends nothing: the remaining symbols
+                        # are independent of it, and treating this as the end of
+                        # a listing stopped the queue on the first typo. See
+                        # page_flow.empty_unit_ends_the_run for the reproduction.
+                        logger.info("%s returned no rows; the remaining symbols "
+                                    "are unaffected.", url)
 
                     if page_num < args.pages:
                         url = (planned[page_num - 1] if planned else
@@ -1616,6 +1655,30 @@ def scrape(args) -> int:
     headers = {o.page_num: o.header for o in outcomes if o.header}
     if headers:
         extra["page_language"] = headers
+
+    # What happened to each unit of work, recorded rather than left in the
+    # log. A run of ten symbols with three typos returns seven rows, and
+    # without these three numbers the only way to notice is to count the
+    # rows yourself and know what you asked for.
+    #
+    # `not_found` is deliberately NOT a failure: Google answered, and the
+    # answer was "there is no such instrument". A run whose only shortfall
+    # is misspelt symbols is `complete` and exits 0 — the symbols that
+    # FAILED (a load error, a block, a regional refusal) are the ones that
+    # make it partial, and those already land in `pages_failed`.
+    _states = [getattr(o, "state", None) for o in outcomes]
+    extra.update({
+        "symbols_requested": len(getattr(args, "_symbol_urls", []) or []),
+        "symbols_ok": sum(1 for o in outcomes if o.ok and o.products),
+        "symbols_not_found": sum(1 for s in _states if s == "not_found"),
+        "symbols_failed": sum(1 for o in outcomes if not o.ok),
+    })
+    _missing = extra["symbols_not_found"]
+    if _missing:
+        logger.warning(
+            "%d of %d symbol(s) do not exist on Google Finance; the run is "
+            "complete and those rows are simply absent. The sidecar records "
+            "the counts.", _missing, extra["symbols_requested"])
 
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,

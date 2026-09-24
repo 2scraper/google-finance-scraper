@@ -38,6 +38,7 @@ than silently folded into "added"/"removed", which would be wrong on its face.
 """
 
 import argparse
+import dataclasses
 import json
 import pathlib
 import re
@@ -65,23 +66,42 @@ from output_writer import UNIQUE_BY_SKU_MODES, DEDUPE_KEY_BY_MODE
 # NOT tracked: `rating` and `review_count`, which drift upwards constantly
 # and would make every diff noisy, and `genre_rank`, which is the item's
 # standing in a listing this run never fetched.
-TRACKED_FIELDS = ("price", "original_price", "discount_pct", "currency",
-                  "price_max", "subscription_price", "points", "point_rate",
-                  "shipping_fee", "free_shipping", "in_stock")
+# Fields that identify a row or describe the RUN rather than the data. Never
+# compared: `scraped_at` differs on every run by construction, `url` and
+# `page`/`position` move when a list is reordered, and the key fields are
+# what matched the two rows in the first place.
+IDENTITY_FIELDS = ("source", "scraped_at", "url", "sku", "page", "position",
+                   "market", "price_source")
 
-# The subset of TRACKED_FIELDS whose comparability depends on price_source
-# matching between the two runs — see diff_products.
-#
-# All five money columns are in it, and on this site that guard earns its
-# keep across MODES rather than across rendering states: a listing row
-# (`price_source: "state"`) publishes no was-price at all while a product row
-# (`"itemdata"`) publishes one where Google Finance's own verification flag allows
-# it. So diffing a listing run against a product run would otherwise report
-# a discount appearing on every product in the file, and not one of those
-# would be a price change.
-# What a diff reports a change in, across all five row classes. A field
-# absent from a row class is simply never compared, so one tuple serves all
-# of them.
+
+def tracked_fields(mode: Optional[str] = None) -> tuple:
+    """Every field of `mode`'s row class that describes the DATA.
+
+    DERIVED from the row class rather than listed by hand, and that is the
+    whole point of this function. The hand-written list this replaces was
+    the donor repo's — price, original_price, discount_pct, points,
+    shipping_fee, in_stock — and none of those exist on any row class here.
+    So the comparison looked at nothing that this site publishes:
+
+        prev_close 349.50 -> 352.25   reported "0 changed"
+        revenue    (any change)       reported "0 changed"
+        close      (any change)       reported "0 changed"
+
+    while a `price` change was reported correctly, which is exactly what
+    kept it plausible. A third-party audit found it on 2026-09-24, and the
+    family had already found the same shape in about ten sibling repos.
+
+    Deriving means a column added to a row class is compared from the day
+    it exists, which a list cannot promise.
+    """
+    from output_writer import ROW_CLASS_BY_MODE, Quote
+    cls = ROW_CLASS_BY_MODE.get(mode or "", Quote)
+    key = DEDUPE_KEY_BY_MODE.get(mode or "", "sku")
+    key = (key,) if isinstance(key, str) else tuple(key)
+    return tuple(f.name for f in dataclasses.fields(cls)
+                 if f.name not in IDENTITY_FIELDS and f.name not in key)
+
+
 PRICE_FIELDS = ("price", "prev_close", "change", "change_pct",
                 "target_mean", "target_low", "target_high",
                 "revenue", "net_income", "eps", "close")
@@ -203,12 +223,13 @@ def diff_products(old: List[dict], new: List[dict],
     # drops them. So there is no placement column for a lifecycle bucket to
     # key on, and porting one would be dead code that looks load-bearing
     # (§4).
+    tracked = tracked_fields(mode)
     changed, source_changed, within_tolerance = [], [], []
     for sku in old_by_sku.keys() & new_by_sku.keys():
         before, after = old_by_sku[sku], new_by_sku[sku]
         field_changes = {
             field: {"old": before.get(field), "new": after.get(field)}
-            for field in TRACKED_FIELDS
+            for field in tracked
             if before.get(field) != after.get(field)
         }
         if not field_changes:

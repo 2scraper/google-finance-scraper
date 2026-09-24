@@ -1609,6 +1609,293 @@ def test_ci_checks_is_wired_up():
     return ok
 
 
+# A regional refusal, RECONSTRUCTED rather than captured — said plainly
+# because every other fixture in this repo is cut from a real page and
+# verified to parse identically to it. This one cannot be: the condition is
+# invisible from the exits this repo has, and both of them (Helsinki and
+# GitHub's runners) are in regions Google serves Finance in. It was reported
+# by a third-party audit on 2026-09-24, with the status and the sentence
+# quoted. What the checks below test is therefore the MARKER and the state
+# machine around it, not a claim about the page's exact bytes.
+REGION_403 = (
+    "<html><head><title>Error 403 (Forbidden)!!1</title></head><body>"
+    "<p><b>403.</b> <ins>That\u2019s an error.</ins></p>"
+    "<p>Google Finance is currently not supported in your region."
+    "<ins>That\u2019s all we know.</ins></p></body></html>"
+)
+
+
+def test_every_tracked_field_is_actually_compared():
+    group("one mutation per comparable field, per mode")
+    ok = True
+    import diff_runs
+    # THE defect, found by a third-party audit on 2026-09-24: the comparison
+    # read a hand-written list of the DONOR repo's columns — price,
+    # original_price, discount_pct, points, shipping_fee, in_stock — and
+    # none of those exist on any row class here. So `prev_close`, `revenue`
+    # and `close` all diffed as "0 changed" while `price` diffed correctly,
+    # which is exactly what kept it plausible.
+    #
+    # The list is derived from the row class now, and this is what proves
+    # the derivation reaches every field: change exactly ONE value and
+    # require it to come back in `changed`.
+    def sample(mode):
+        cls = ROW_CLASS_BY_MODE[mode]
+        row = {f.name: None for f in dataclasses.fields(cls)}
+        row.update(source=SOURCE_DEFAULT, sku="GOOGL:NASDAQ", title="Alphabet")
+        key = DEDUPE_KEY_BY_MODE.get(mode, "sku")
+        for k in ((key,) if isinstance(key, str) else key):
+            if row.get(k) is None:
+                row[k] = {"fiscal_year": 2026, "fiscal_quarter": 2,
+                          "interval": "1d", "ts": "2026-09-21T16:00:00-04:00",
+                          "listing": "index", "analyst": "A N Other",
+                          "action_date": "2026-09-17", "headline": "h",
+                          "event_date": "2026-09-22"}.get(k, "GOOGL:NASDAQ")
+        return row
+
+    def mutate(value, name):
+        if isinstance(value, bool) or value is None:
+            return {"str": "x"}.get("str") if name in ("title",) else 1
+        if isinstance(value, (int, float)):
+            return value + 1
+        return str(value) + "x"
+
+    total = 0
+    for mode in pp.ALL_MODES:
+        fields = diff_runs.tracked_fields(mode)
+        ok &= check("%s has fields to compare (%d)" % (mode, len(fields)),
+                    len(fields) >= 5)
+        # The set must COVER the row class, not merely be non-empty. A
+        # mutation sweep alone cannot catch a short list — everything IN a
+        # short list is still detected — which is how the donor's
+        # seven-field list looked healthy. Measured against the dataclass.
+        cls = ROW_CLASS_BY_MODE[mode]
+        key = DEDUPE_KEY_BY_MODE.get(mode, "sku")
+        key = (key,) if isinstance(key, str) else tuple(key)
+        want = {f.name for f in dataclasses.fields(cls)
+                if f.name not in diff_runs.IDENTITY_FIELDS
+                and f.name not in key}
+        ok &= check("%s: the tracked set covers its row class%s"
+                    % (mode, "" if want == set(fields)
+                       else " (missing %s, extra %s)"
+                       % (sorted(want - set(fields)), sorted(set(fields) - want))),
+                    want == set(fields))
+        missed = []
+        for name in fields:
+            before = sample(mode)
+            after = dict(before)
+            after[name] = mutate(before.get(name), name)
+            if after[name] == before.get(name):
+                continue
+            res = diff_runs.diff_products([before], [after], mode=mode)
+            names = {k for row in res.get("changed", [])
+                     for k in row.get("changes", {})}
+            # some rows land in `within_tolerance` or `source_changed`
+            for bucket in ("within_tolerance", "source_changed"):
+                names |= {k for row in res.get(bucket, [])
+                          for k in row.get("changes", {})}
+            if name not in names:
+                missed.append(name)
+            total += 1
+        ok &= check("%s: every comparable field is detected%s"
+                    % (mode, "" if not missed else " (missed %s)" % missed),
+                    not missed)
+    ok &= check("the mutation sweep actually ran (%d mutations)" % total,
+                total >= 80)
+    return ok
+
+
+def test_one_bad_symbol_does_not_end_the_queue(skips):
+    group("a row-less symbol ends nothing")
+    ok = True
+    # THE defect: the engines inherited a pagination terminator — "a page
+    # with no rows is the end of the listing" — and this site's unit of
+    # work is the SYMBOL, which is independent of every other. Reproduced
+    # live on 2026-09-24 before the fix:
+    #
+    #   --symbols GOOGL:NASDAQ,ZZZZQQ:NASDAQ,BMW:ETR
+    #   -> 2 fetches, BMW:ETR never requested, 1 row,
+    #      stop_reason=no_new_products, status=complete, exit 0
+    #
+    # A caller asking for ten instruments with one typo got the rows up to
+    # the typo and a clean exit.
+    ok &= check("the policy says a row-less unit ends nothing here",
+                page_flow.empty_unit_ends_the_run(pp.quote_url("X:Y"))
+                is False)
+    # Both terminators must consult it — the sequential `break` and the
+    # concurrent `exhausted` event.
+    for eng in ENGINES:
+        path = os.path.join(REPO_ROOT, eng + ".py")
+        if not os.path.exists(path):
+            continue
+        text = open(path, encoding="utf-8").read()
+        tree = ast.parse(text, eng)
+        guarded = {n.lineno for n in ast.walk(tree)
+                   if isinstance(n, ast.Call)
+                   and getattr(n.func, "attr", "") == "empty_unit_ends_the_run"}
+        ok &= check("%s consults the policy before ending the run" % eng,
+                    bool(guarded))
+        # And no bare terminator is left: every `stop_reason =
+        # "no_new_products"` must sit under a test that mentions it.
+        bare = []
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Assign)
+                    and isinstance(n.value, ast.Constant)
+                    and n.value.value == "no_new_products"):
+                enclosing = [f for f in ast.walk(tree)
+                             if isinstance(f, ast.If)
+                             and f.lineno <= n.lineno <= f.end_lineno
+                             and "empty_unit_ends_the_run" in ast.unparse(f.test)]
+                if not enclosing:
+                    bare.append(n.lineno)
+        ok &= check("%s has no ungated listing terminator%s"
+                    % (eng, "" if not bare else " (line %s)" % bare), not bare)
+
+    # Drive the concurrent dispatcher with the browser stubbed out, because
+    # a live run cannot reach it reliably: the first unit is fetched alone
+    # and decides whether the rest may be dispatched at all.
+    try:
+        import playwright_scraper as pws
+    except ImportError as e:
+        skips.append("concurrent symbol queue (%s)" % e)
+        print("  SKIP  playwright_scraper absent")
+        return ok
+
+    fetched = []
+
+    class _Outcome:
+        def __init__(self, page_num, url, products):
+            self.page_num, self.final_url = page_num, url
+            self.products, self.ok = products, True
+            self.state = "content" if products else "not_found"
+            self.blocked_by = None
+            self.load_failed = False
+            self.cap = self.header = self.shop_facts = None
+
+    def fake_fetch(session, args, pool, page_num, url):
+        fetched.append(url)
+        # the middle symbol is the one Google has no instrument for
+        return _Outcome(page_num, url, [] if "ZZZZQQ" in url else [object()])
+
+    specs = [(i, pp.quote_url(s)) for i, s in enumerate(
+        ["GOOGL:NASDAQ", "ZZZZQQ:NASDAQ", "BMW:ETR"], 1)]
+
+    class _Args:
+        mode, pages, concurrency, retries = "quote", 3, 2, 1
+        cdp_endpoint = None
+        headless = True
+        delay = 0
+        url = pp.quote_url("GOOGL:NASDAQ")
+
+    class _Session:
+        pool = None
+        page = None
+
+        def open(self):
+            return self
+
+        def close(self):
+            return None
+
+    class _PW:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *a):
+            return False
+
+    saved = {n: getattr(pws, n) for n in
+             ("_fetch_one_page", "_BrowserSession", "sync_playwright")}
+    try:
+        pws._fetch_one_page = fake_fetch
+        pws._BrowserSession = lambda *a, **k: _Session()
+        pws.sync_playwright = lambda: _PW()
+        pws._fetch_pages_concurrently(_Args(), None, specs, 2)
+    except Exception as e:  # noqa: BLE001 — report rather than hide
+        ok &= check("the dispatcher ran with a stubbed browser (%s: %s)"
+                    % (type(e).__name__, e), False)
+    finally:
+        for n, v in saved.items():
+            setattr(pws, n, v)
+
+    ok &= check("all three symbols were dispatched despite the middle one "
+                "returning nothing (%d of 3)" % len(set(fetched)),
+                len(set(fetched)) == 3)
+    ok &= check("...including the one AFTER the empty symbol",
+                any("BMW" in u for u in fetched))
+    return ok
+
+
+def test_a_regional_refusal_is_not_an_empty_market():
+    group("a regional 403 is an access condition, not an empty market")
+    ok = True
+    url = pp.quote_url("GOOGL:NASDAQ")
+    # THE defect this exists for: the engines discarded page.goto()'s
+    # response, so no status reached the classifier, the page fell through
+    # to `unknown`, was retried, and the run ended as exit 4 — the code
+    # that means "the page loaded and the market is empty". A pipeline
+    # reading that cannot tell a country it may not scrape from a market
+    # with no data in it.
+    ok &= check("classified with a status", pp.detect_page_state(
+        REGION_403, 403, url, "quote") == "region_unavailable")
+    # And WITHOUT one, because selenium cannot obtain a status at all: the
+    # marker is matched on the body so all three engines agree.
+    ok &= check("classified without a status too", pp.detect_page_state(
+        REGION_403, None, url, "quote") == "region_unavailable")
+    ok &= check("it is not `unknown`", pp.detect_page_state(
+        REGION_403, None, url, "quote") != "unknown")
+    ok &= check("no row is parsed from it",
+                pp.parse_products(REGION_403, url, mode="quote") == [])
+    policy = page_flow.STATE_POLICY["region_unavailable"]
+    ok &= check("not parsed", policy["parse"] is False)
+    ok &= check("counts as blocked, so the run reports exit 3 rather than 4",
+                policy["blocked"] is True)
+    advice = page_flow.block_advice(REGION_403, headless=True, has_pool=False)
+    ok &= check("its advice names the COUNTRY rather than the address",
+                "COUNTRY" in advice)
+    ok &= check("...and warns that --market does not substitute for an exit",
+                "--market" in advice and "gl" in advice)
+    ok &= check("a served page is not mistaken for it",
+                not pp.is_region_unavailable(_fx("markets_us")["html"]))
+
+    # Every engine must now keep the response and hand the status on. Two
+    # of three can; selenium cannot, which is why the marker above is read
+    # from the body.
+    for eng in ("playwright_scraper", "puppeteer_scraper"):
+        path = os.path.join(REPO_ROOT, eng + ".py")
+        if not os.path.exists(path):
+            continue
+        text = open(path, encoding="utf-8").read()
+        tree = ast.parse(text, eng)
+        # Asserted on the AST, not on a regex over the source: pyppeteer's
+        # assignment spans two lines with the `goto(` on the second, and a
+        # line-oriented pattern reported a correct engine as broken. This
+        # repo has now made that mistake three times.
+        kept = any(
+            isinstance(n, ast.Assign)
+            and any(isinstance(c, ast.Call)
+                    and getattr(c.func, "attr", "") == "goto"
+                    for c in ast.walk(n.value))
+            for n in ast.walk(tree))
+        ok &= check("%s keeps goto's response" % eng, kept)
+        calls = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)
+                 and (getattr(n.func, "attr", "") == "classify"
+                      or getattr(n.func, "id", "") == "_classify")]
+        # EVERY call site, not any of them. `any()` here passed while two of
+        # three were still statusless — a control that reverted one call site
+        # left the suite green, which is the "weak check against a broken
+        # filter" failure this repo has already paid for once.
+        statusless = [n.lineno for n in calls
+                      if not (any(k.arg == "status" for k in n.keywords)
+                              or len(n.args) >= 3)]
+        ok &= check("%s: all %d classify call(s) pass a status%s"
+                    % (eng, len(calls),
+                       "" if not statusless else " (statusless at %s)" % statusless),
+                    calls and not statusless)
+    return ok
+
+
 def test_diff_runs_can_match_mode_c():
     group("diff_runs matches the mode it is given")
     ok = True
@@ -1796,11 +2083,33 @@ def test_canary_is_coherent():
     ok &= check("it runs on a schedule, not only on dispatch",
                 "schedule:" in wf and "cron:" in wf)
 
-    # Every mode must be under daily test, or a mode can rot unnoticed.
+    # Every mode must be under daily test, or a mode can rot unnoticed —
+    # and this must look at the COMMANDS, not at the file.
+    #
+    # The first version grepped the whole YAML for "--mode <name>" and
+    # passed for `movers` on a line of the workflow's own HEADER COMMENT
+    # ("`--mode movers --market US` returned 11"). The canary never ran
+    # movers. A third-party audit found it on 2026-09-24; the check that
+    # was supposed to prevent exactly this was satisfied by prose about it.
+    #
+    # Comment lines are stripped before looking. Deliberately not parsed
+    # with PyYAML: the offline suite installs requirements.txt only, and a
+    # check that silently skips when an optional import is missing is the
+    # failure mode this whole section is about. A line whose first
+    # non-space character is `#` is a comment in YAML and in shell alike,
+    # which is all this needs.
+    commands = "\n".join(l for l in wf.split("\n")
+                          if not l.lstrip().startswith("#"))
+    ok &= check("stripping comments actually removed something",
+                len(commands) < len(wf))
     for mode in pp.ALL_MODES:
-        ok &= check("the canary exercises --mode %s" % mode,
-                    "--mode %s" % mode in wf or
-                    ('for mode in' in wf and mode in wf))
+        direct = "--mode %s" % mode in commands
+        # `for mode in a b c; do ... --mode "$mode"` is a real invocation.
+        looped = bool(re.search(r"for mode in ([^\n;]*)", commands)
+                      and any(mode in m.group(1).split()
+                              for m in re.finditer(r"for mode in ([^\n;]*)",
+                                                   commands)))
+        ok &= check("the canary RUNS --mode %s" % mode, direct or looped)
 
     # `set +e` before capturing an exit code: GitHub runs `run:` steps under
     # `bash -e`, so without it a non-zero scraper exit aborts the step before
@@ -1987,6 +2296,9 @@ def main() -> int:
     ok &= test_dockerfile_copies_what_it_imports()
     ok &= test_sample_output_matches_the_schema()
     ok &= test_ci_checks_is_wired_up()
+    ok &= test_every_tracked_field_is_actually_compared()
+    ok &= test_one_bad_symbol_does_not_end_the_queue(skips)
+    ok &= test_a_regional_refusal_is_not_an_empty_market()
     ok &= test_diff_runs_can_match_mode_c()
     ok &= test_many_currencies_in_one_run_is_normal_here()
     ok &= test_no_public_function_without_a_consumer()

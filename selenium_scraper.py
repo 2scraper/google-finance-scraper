@@ -20,7 +20,14 @@ are stated here rather than left to be discovered:
   and the run warns, rather than letting anyone believe a `user:pass` URL is
   doing something.
 
-* **It cannot give you an HTTP status.** That costs nothing on this site,
+* **It cannot give you an HTTP status**, and that is no longer free. It was
+  written here that it costs nothing, which was true of the states known at
+  the time and false of the one an audit found afterwards: Google serves a
+  REGIONAL refusal as HTTP 403, and a status-only rule would leave this
+  engine calling it `unknown` and retrying it. The marker for that state is
+  therefore matched on the BODY — `product_parser.REGION_MARKERS` — so all
+  three engines classify it identically. What follows is the original point,
+  which still holds for the other states:
   which is worth saying because it costs a sibling a whole signal: Google
   answers a refused client with HTTP 200 and a DIFFERENT PAGE rather than
   with a status, so `not_found` and `unsupported_client` are both settled
@@ -421,6 +428,15 @@ def _next_page_candidates(session, page_num: int) -> List[str]:
     expression the other two engines pass. That difference is exactly why no
     JavaScript crosses the page_flow boundary.
     """
+    # An EMPTY selector is not a selector, and handing one to
+    # querySelectorAll is a DOMException rather than an empty result.
+    # `NEXT_PAGE_SELECTOR` is deliberately "" on this site because there is
+    # no next page to advertise, so this scan has nothing to do — and the
+    # crash only surfaced once the symbol-queue fix let a run continue past
+    # a row-less symbol and reach this line at all.
+    if not page_flow.next_page_selector(page_num):
+        return []
+
     try:
         hrefs = session.driver.execute_script(
             "return Array.from(document.querySelectorAll(arguments[0]))"
@@ -983,12 +999,19 @@ def scrape(args) -> int:
                 if not outcome.served_requested_page:
                     stop_reason = "end_of_listing"
                     break
-                if not fresh_count:
+                if not fresh_count and page_flow.empty_unit_ends_the_run(url):
                     logger.info("Page %d added no rows not already seen — "
                                 "treating that as the end of the listing.",
                                 page_num)
                     stop_reason = "no_new_products"
                     break
+                if not fresh_count:
+                    # A row-less SYMBOL ends nothing: the remaining symbols
+                    # are independent of it, and treating this as the end of
+                    # a listing stopped the queue on the first typo. See
+                    # page_flow.empty_unit_ends_the_run for the reproduction.
+                    logger.info("%s returned no rows; the remaining symbols "
+                                "are unaffected.", url)
 
                 if page_num < args.pages:
                     nxt = _next_page_candidates(session, page_num)
@@ -1110,6 +1133,30 @@ def scrape(args) -> int:
     headers = {o.page_num: o.header for o in outcomes if o.header}
     if headers:
         extra["page_language"] = headers
+
+    # What happened to each unit of work, recorded rather than left in the
+    # log. A run of ten symbols with three typos returns seven rows, and
+    # without these three numbers the only way to notice is to count the
+    # rows yourself and know what you asked for.
+    #
+    # `not_found` is deliberately NOT a failure: Google answered, and the
+    # answer was "there is no such instrument". A run whose only shortfall
+    # is misspelt symbols is `complete` and exits 0 — the symbols that
+    # FAILED (a load error, a block, a regional refusal) are the ones that
+    # make it partial, and those already land in `pages_failed`.
+    _states = [getattr(o, "state", None) for o in outcomes]
+    extra.update({
+        "symbols_requested": len(getattr(args, "_symbol_urls", []) or []),
+        "symbols_ok": sum(1 for o in outcomes if o.ok and o.products),
+        "symbols_not_found": sum(1 for s in _states if s == "not_found"),
+        "symbols_failed": sum(1 for o in outcomes if not o.ok),
+    })
+    _missing = extra["symbols_not_found"]
+    if _missing:
+        logger.warning(
+            "%d of %d symbol(s) do not exist on Google Finance; the run is "
+            "complete and those rows are simply absent. The sidecar records "
+            "the counts.", _missing, extra["symbols_requested"])
 
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,

@@ -83,6 +83,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 from product_parser import (PAGE_CAP, canonical_url, capped_by_site,
                             detect_block_marker, detect_bot_challenge,
                             detect_page_state, is_not_found,
+                            is_region_unavailable,
                             is_unsupported_client, listing_kind,
                             market_from_url, market_metadata,
                             no_pagination_reason, pages_beyond_cap,
@@ -305,6 +306,16 @@ STATE_POLICY: Dict[str, Dict[str, bool]] = {
     # own sends a reader to buy a proxy they do not need.
     "throttled": {"parse": False, "retry": True, "solve": False, "blocked": False},
 
+    # The COUNTRY is refused, not this address's reputation. It counts as
+    # blocked because the caller got no data and exit 3 is what says so —
+    # but it needs its own state rather than sharing `blocked`, because the
+    # advice is different in kind: no amount of rotating within a refused
+    # region helps, and the fix is an exit in a region Google serves
+    # Finance in. Retried like a block so that a pool which DOES cross
+    # regions can find one.
+    "region_unavailable": {"parse": False, "retry": True, "solve": False,
+                           "blocked": True},
+
     "challenge": {"parse": False, "retry": True, "solve": True, "blocked": False},
     "blocked": {"parse": False, "retry": True, "solve": False, "blocked": True},
 
@@ -457,6 +468,19 @@ def block_advice(html: Optional[str], headless: bool,
             "EURUSD:CURRENCY returns HTTP 200 with this page and echoes the "
             "ticker back 17 times, so it reads like a served quote.")
 
+    if is_region_unavailable(html or ""):
+        return (
+            "region unavailable. Google answered that Finance is not served "
+            "in this exit's COUNTRY — its own sentence, under HTTP 403. This "
+            "is an access condition and not a defect, but it is also not the "
+            "ordinary kind of block: rotating to another address in the same "
+            "country changes nothing, and no captcha solve applies. Use an "
+            "exit in a region Google serves Finance in (--proxy, or the "
+            "`country-` segment of a Scraping Browser endpoint). Note that "
+            "--market/`gl` does NOT substitute for this: it selects which "
+            "market's data you get AFTER the request is served, so it "
+            "cannot get you past a regional refusal.")
+
     marker = detect_block_marker(html or "") or "no marker"
     return (
         "blocked (%s). This is Google's own interstitial, which it serves to "
@@ -535,6 +559,33 @@ def pagination_is_addressable(url: str = "", html: Optional[str] = None) -> bool
 def comparable(url: str) -> str:
     """A url reduced to what makes two urls the same listing."""
     return canonical_url(url)
+
+
+def empty_unit_ends_the_run(url: str = "") -> bool:
+    """Does a unit of work coming back row-less mean there is no more work?
+
+    False here, always, and this function exists because the answer was
+    silently True for months.
+
+    On a PAGINATED site it is a good terminator: page 6 of a 5-page listing
+    has no rows, and stopping there is what keeps a `--pages 50` run from
+    fetching 45 empty pages. The engines inherited that rule, and this site
+    has no pages — its unit of work is the SYMBOL, and symbols are
+    independent of one another.
+
+    So a single misspelt or delisted symbol ended the queue. Reproduced on
+    2026-09-24:
+
+        --symbols GOOGL:NASDAQ,ZZZZQQ:NASDAQ,BMW:ETR
+        -> 2 fetches attempted, BMW:ETR never requested,
+           1 row, stop_reason=no_new_products, status=complete, exit 0
+
+    A caller asking for ten instruments with one typo among them got the
+    rows up to the typo and a clean exit. That is this codebase's worst
+    failure class — doing less than it says while reporting success — and
+    it arrived by inheritance rather than by authorship (CLAUDE.md §16).
+    """
+    return False
 
 
 def next_page_candidates(current_url: str,

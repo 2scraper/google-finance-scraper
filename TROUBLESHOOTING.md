@@ -54,6 +54,32 @@ direction; it is the User-Agent.
 
 ---
 
+## Exit 3 with "region unavailable"
+
+Google answered that Finance is **not served in your exit's country** — its
+own sentence, under HTTP 403. Reported by a third-party audit on 2026-09-24
+and not reproducible from this repo's own exits, which are all in supported
+regions.
+
+This is an access condition, and not the ordinary kind of block:
+
+* rotating to another address **in the same country** changes nothing;
+* no captcha applies — there is no challenge on that page;
+* **`--market` does not substitute for an exit.** It selects which market's
+  data you are served; the regional gate decides whether you are served at
+  all, and it is checked first.
+
+Use an exit in a region Google serves Finance in: `--proxy`, or the
+`country-` segment of a Scraping Browser endpoint.
+
+Until 2026-09-24 this page classified as `unknown` and the run ended as
+**exit 4** — the code that means "the page loaded and the market is empty".
+The engines discarded the HTTP status. If you are on an older build and
+seeing empty results from a region you are unsure about, that is the first
+thing to check.
+
+---
+
 ## Exit 3 (blocked)
 
 Genuinely surprising here: **11 fetches from a datacentre address met no

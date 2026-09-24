@@ -103,6 +103,25 @@ jobs:
             --out canary_quotes --dump-html canary_quotes.html
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
+      - name: Scrape the day's movers
+        id: movers
+        # Its own step rather than folded into the markets one: the movers
+        # lists are PREVIEWS the site rebuilds through the session, so a
+        # markets page that parses fine while the movers strip empties out
+        # is a distinct thing to see.
+        #
+        # This step is the reason the mode check in smoke_test.py was
+        # rewritten. The old check grepped the whole workflow for
+        # "--mode movers" and was satisfied by the header comment above,
+        # so this mode had never actually run here.
+        continue-on-error: true
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --mode movers --market US --retries 4 \
+            --out canary_movers --dump-html canary_movers.html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
       - name: Scrape the upcoming earnings calendar
         id: earnings
         # The market page's calendar, which is geo-selected like every other
@@ -157,6 +176,7 @@ jobs:
           tested=true
           for pair in "markets:${{ steps.markets.outputs.exit_code }}" \
                       "quotes:${{ steps.quotes.outputs.exit_code }}" \
+                      "movers:${{ steps.movers.outputs.exit_code }}" \
                       "earnings:${{ steps.earnings.outputs.exit_code }}" \
                       "deep:${{ steps.deep.outputs.exit_code }}"; do
             name="${pair%%:*}"; code="${pair##*:}"
@@ -318,6 +338,29 @@ jobs:
                    "a quote page publishes it; a list row does not")
 
 
+          # ---- the movers previews ----------------------------------------
+          mov = json.load(open("canary_movers.json"))
+          # 11 rows on the 2026-09-22 capture across three lists. Floored at
+          # 3 rather than 11: these are previews the site resizes through
+          # the session, and one list can legitimately be a single row.
+          want("only %d movers rows" % len(mov), len(mov) >= 3,
+               "measured 11 across three lists")
+          mov_lists = {r.get("listing") for r in mov}
+          want("movers carries an unexpected list (%s)" % sorted(
+                   l for l in mov_lists if l),
+               mov_lists <= {"gainers", "losers", "most_active",
+                             "movers_0", "movers_1", "movers_2"})
+          want("every movers row is priced",
+               all(r.get("price") is not None for r in mov))
+          # The positional labels hold only while gainers really are up and
+          # losers really are down; the parser downgrades to movers_N when
+          # they do not. Seeing the downgrade is worth knowing about.
+          if {"movers_0", "movers_1", "movers_2"} & mov_lists:
+              print("::warning::The movers lists stopped looking like "
+                    "gainers and losers, so the parser downgraded their "
+                    "labels to positional names. Google may have reordered "
+                    "the strip.")
+
           # ---- the earnings calendar --------------------------------------
           earn = json.load(open("canary_earnings.json"))
           # 5 events on the 2026-09-22 capture. Floored at 1 rather than 5:
@@ -433,9 +476,9 @@ jobs:
               raise SystemExit(1)
           print("canary OK: %d market rows across %d strips, %d quotes, "
                 "%d financial periods, %d analyst rows, %d chart bars, "
-                "%d earnings events, %.0f%% priced, complete"
+                "%d movers rows, %d earnings events, %.0f%% priced, complete"
                 % (len(rows), len(strips), len(quotes), len(fin), len(ana),
-                   len(cha), len(earn), share))
+                   len(cha), len(mov), len(earn), share))
           print("           chart: %d daily + %d intraday bars"
                 % (len(daily), len(intraday)))
           PY
@@ -456,6 +499,7 @@ jobs:
             canary_analysts.json
             canary_chart.json
             canary_earnings.json
+            canary_movers.json
             canary_*.meta.json
             canary_*.html*
           if-no-files-found: warn

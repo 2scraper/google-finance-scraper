@@ -179,6 +179,26 @@ UNSUPPORTED_MARKERS = (
     "m=unsupportedview",
 )
 
+# THE REGIONAL REFUSAL, which is not a block of this address's reputation
+# but of its COUNTRY.
+#
+# Google answers a request from a country it does not serve Finance in with
+# HTTP 403 and its own sentence. Reported by a third-party audit on
+# 2026-09-24 and not reproducible from this repo's own exits — Helsinki and
+# GitHub's runners are both in supported regions — which is exactly why it
+# needs a marker rather than a measurement: the condition is invisible from
+# where the code was written.
+#
+# Matched on the BODY, not only on the status, and that is deliberate:
+# selenium_scraper.py cannot obtain an HTTP status at all, so a
+# status-only rule would leave one of three engines calling this `unknown`
+# and retrying it. CLAUDE.md §8: take the status where it is available and
+# find a STRUCTURAL signal for where it is not.
+REGION_MARKERS = (
+    "not supported in your region",
+    "currently not supported in your",
+)
+
 # A served page is built out of the site's own assets; an interstitial is
 # not. CLAUDE.md §8's structural secondary signal, and on this site the
 # asset host is unambiguous — measured 40 to 130 references on every served
@@ -1342,6 +1362,18 @@ def is_unsupported_client(html: Optional[str]) -> bool:
     return any(m in html for m in UNSUPPORTED_MARKERS)
 
 
+def is_region_unavailable(html: Optional[str]) -> bool:
+    """Does the page say Google Finance is not served in this country?
+
+    Scanned over the whole document like the other state markers — the
+    sentence sits inside Google's error page, which is small, but bounding
+    it would be a guess about a page nobody here has captured.
+    """
+    if not html:
+        return False
+    return any(m in html for m in REGION_MARKERS)
+
+
 def served_by_google(html: Optional[str]) -> bool:
     """Was this built out of Google Finance's own assets?
 
@@ -1405,6 +1437,11 @@ def detect_page_state(html: Optional[str], status: Optional[int] = None,
         return "unsupported_client"
     if is_not_found(html):
         return "not_found"
+    # Before the generic status rules below, because a regional refusal
+    # arrives AS a 403 and "blocked" would send the reader to rotate an
+    # address within a country that is refused wholesale.
+    if is_region_unavailable(html):
+        return "region_unavailable"
     if detect_block_marker(html):
         return "blocked"
     if status is not None and status >= 500:
