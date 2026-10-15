@@ -12,51 +12,30 @@ body:
 
         A few things answer most reports faster than we can:
 
-        - **Everything exit 3?** Check the CLIENT before you check the
-          address. The listing routes on this site need no proxy and no key
-          — measured 2026-09-21, one datacentre IP was served 45 products a
-          page by plain curl AND by headless Chromium, and refused with a
-          43-byte deny only when a curl handshake claimed a Chrome
-          User-Agent. So look for a user agent or fingerprint that disagrees
-          with the TLS handshake under it. See
+        - **Exit 3 with `region_unavailable`?** Google answered that Finance
+          is not served in your exit's COUNTRY (measured: an RU exit got
+          HTTP 403, US/DE/FR/HU/PL/CZ/AT were served). `--market` cannot get
+          past it; use an exit in a supported country. See
           [TROUBLESHOOTING.md](../blob/main/TROUBLESHOOTING.md).
-        - **Exit 3 only after page 1?** That is the shape a fingerprint
-          problem takes here: nav 1 served, navs 2 onward denied. Test any UA
-          or `--fingerprint` change over two pages.
-        - **HTTP 503 and アクセスが集中しております?** That is Google Finance's own
-          rate-limit page, not a block. Raise `--delay` or lower
-          `--concurrency`.
-        - **`price` null on some rows?** Worth this issue: `price` was
-          populated on 405 of 405 measured rows. Say which URL and attach the
-          `--dump-html` output.
-        - **`original_price` or `discount_pct` null?** Expected on the
-          listing route — the payload publishes no was-price at all. Use
-          `--mode product`, which reads Google Finance's verified reference price.
-        - **`in_stock` True on every row?** Expected: the search excludes
-          sold-out products rather than marking them.
-        - **`rating` and `review_count` empty on some rows?** Expected:
-          nobody has reviewed that product. Google Finance writes that as
-          `{score: 0, numReviews: 0}` and both columns are nulled together.
-        - **`currency` null on later pages?** The site states the currency in
-          a JSON-LD block it publishes on page 1 only, and the run carries it
-          forward. A null means that block moved — worth this issue.
-        - **Zero rows?** You may be on a route that has none: the mall front
-          page carries campaign rails and no grid; a merchant storefront
-          (`www.google.com/finance/{shop}/`) carries an EMPTY payload; and
-          `ranking.google.com/finance` is a different application this repo does
-          not read. Those are exit 4 and correct answers.
-        - **A page collected twice?** Worth this issue. Google Finance re-serves
-          page 1 under HTTP 200 past the end of a listing, and the run is
-          supposed to detect that from the offset the server states.
-        - **The run stopped short of the catalogue?** That is the site's own
-          cap, and it is severe here: Google Finance serves at most 6,750 results
-          per query (150 pages of 45) however many it matched. One measured
-          query reported 3,053,682 matches against that same 6,750. The run
-          reports both numbers in its sidecar. Narrow the query with the
-          site's own filters — genre, price band, shop, tag — and run each
-          slice.
-        - **Wrong language?** The language is a path segment (`/ar/`), not
-          something the exit IP decides. Prices are AED for every visitor.
+        - **`unsupported_client` in the sidecar?** Google redirected a client
+          whose User-Agent does not look like a browser. Every engine sets
+          one, so something overrode it — check any UA or fingerprint option
+          before buying an exit. This is not a block.
+        - **Exit 3 with Google's interstitial?** That one is about the
+          address: rotate exits with a proxy pool, or use a Scraping Browser
+          endpoint.
+        - **`not_found`?** Check the symbol: `TICKER:EXCHANGE`
+          (`GOOGL:NASDAQ`) for listed instruments, `BASE-QUOTE` (`EUR-USD`,
+          `BTC-USD`) for pairs. `EURUSD:CURRENCY` is the common trap.
+        - **`market_cap` or `volume` null on an index, currency, crypto or
+          futures row?** Expected: Google writes `0` there for "none".
+        - **`movers` returns only a few rows per list?** Expected: the market
+          page publishes a preview of each list, not a ranking.
+        - **A column that used to be filled is null on every row while the
+          run says `complete`?** Worth this issue: a payload record changed
+          shape. Attach the `--dump-html` output.
+        - **`--pages 2` refused?** Expected: the site has no pagination.
+          Pass more `--symbols` instead.
 
   - type: dropdown
     id: engine
@@ -89,9 +68,10 @@ body:
     attributes:
       label: Exit code
       description: >-
-        `echo $?` straight after the run. These mean specific things — 3 is a
-        challenge page, 4 is "ran fine, found nothing", 124 is a self-imposed
-        timeout. The table is in the README.
+        `echo $?` straight after the run. These mean specific things — 3 is
+        blocked, 4 is "the page was fetched and held nothing", 5 is "the
+        content was never obtained", 6 is partial. The table is in the
+        README.
       placeholder: "4"
     validations:
       required: true
@@ -103,9 +83,8 @@ body:
       description: With credentials replaced by `***`.
       render: shell
       placeholder: |
-        python3 playwright_scraper.py \
-          --url "https://search.google.com/finance/search/mall/-/100356/" \
-          --pages 3 --out coffee
+        python3 playwright_scraper.py --mode quote \
+          --symbols GOOGL:NASDAQ,BMW:ETR --out quotes
     validations:
       required: true
 
@@ -125,7 +104,7 @@ body:
     attributes:
       label: What you expected instead
       placeholder: >-
-        96 products, as the README says a category page yields.
+        46 rows from --mode markets --market US, as the README measured.
     validations:
       required: true
 

@@ -29,22 +29,17 @@ that an unrun path says "not run", never "does not work".
 
 WHAT TO KNOW BEFORE USING IT HERE
 ---------------------------------
-* The gate on this site is the CONSISTENCY of the client, not the address.
-  Measured from one datacentre IP: plain curl with curl's own User-Agent was
-  served 92 KB and 45 products; the same curl claiming a Chrome User-Agent
-  got a 43-byte Akamai deny. This API's fetcher gets in, so whatever it
-  sends is self-consistent — but that is a fact about the API today, not a
-  guarantee, and it is exactly the kind of thing to re-measure rather than
-  inherit.
-* If it is ever refused, the refusal arrives under **HTTP 200** with a
-  43-byte body. Neither this client nor the parser may trust the status
-  code; both decide "was this served at all" from the reference-id shape and
-  from the page being built out of Google Finance's own asset hosts.
-* One request is one page. There is no pagination here — pass `?p=N`
-  yourself, and mind that Google Finance caps every query at 6,750 results.
+* What Google gates here is the client's User-Agent (a non-browser one is
+  redirected to /finance/beta/unsupported) and the exit's COUNTRY (some
+  regions get a 403 saying Finance is not supported there). This API's
+  fetcher is a browser, so the first does not apply; the second depends on
+  the exit it uses, and is worth re-measuring rather than inheriting.
+* A refusal is judged from the page, not only the status: whether it is
+  built out of Google's own asset hosts and carries the payload.
+* One request is one page. There is no pagination on this site.
 
     python3 scraper_api_client.py \\
-        --url "https://search.google.com/finance/search/mall/コーヒー/"
+        --url "https://www.google.com/finance/quote/GOOGL:NASDAQ"
 
     # $TWOCAPTCHA_KEY is read from the environment or .env, so a key never
     # has to be typed — a secret in argv is readable by anything that can run

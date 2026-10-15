@@ -40,47 +40,41 @@ not the check caught it.
 
 ## Reporting a site change
 
-Google Finance changing its markup is the normal way this stops working, and it has
-its own issue template. The detail that saves the most time is WHICH source
-broke, because this scraper reads the site's own SSR payload rather than its
-DOM, and there are two different payloads:
+Google Finance changing its payload is the normal way this stops working, and
+it has its own issue template. The detail that saves the most time is WHICH
+record broke. The scraper reads no DOM and no JSON-LD (there is none on this
+site): every row comes out of the `AF_initDataCallback({key: 'ds:N', data:
+[...]})` blobs in the first response, and each mode reads a different record
+inside them, recognised by its SHAPE rather than by its `ds:N` key:
 
-1. **The listing payload.**
-   `window.__INITIAL_STATE__.state.data.the payload` — `items` (45 a page)
-   and `pagination` (`numFound`, `start`, `pageSize`, `subset`). If this key
-   moves, a run reports 0 rows and exit 4, which is loud, and the DOM
-   fallback recovers `url`/`sku`/`title`/`price` and nothing else.
-2. **The detail payload.** `<script type="application/json"
-   id="item-page-app-data">` -> `newApi.itemInfoSku` (with `api.data.itemInfoSku`
-   as the fallback). Its `sku[]`, `purchaseInfo` and `itemReviewInfo` carry
-   the variant prices, the verified was-price and the aggregate rating.
-3. **The currency.** A listing page states it once, in its own JSON-LD, on
-   **page 1 only**. If `currency` goes null across a whole run, that block
-   moved — not the prices.
+1. **The quote record** (`--mode quote`, and the rows of `markets` and
+   `movers`): symbol, price, previous close, day range, volume, market cap.
+2. **The quarterly record** (`--mode financials`): 106 unlabelled numbers per
+   quarter, of which seven are read.
+3. **The analyst record** (`--mode analysts`): the consensus, the buy/hold/sell
+   split, the target range and each published action.
+4. **The bar records** (`--mode chart`): OHLCV, ordered open, close, high, low.
+5. **The earnings calendar** (`--mode earnings`): one entry per announcement,
+   with the street's revenue and EPS estimates.
+
+A run that reports `complete` while a column that used to be filled is null
+on every row usually means one of those records changed shape. Attach the
+`--dump-html` output; the suite's fixtures are cut from exactly those bytes.
 
 Three things about this site that look like bugs and are not, so please check
 them before filing:
 
-* **The JSON-LD on a listing page is NOT the grid.** It is a ten-item SEO
-  carousel; every url in it carries `?scid=seo-carousel-search`. A patch that
-  "fixes" the parser to read it would return ten rows of the wrong products.
-* **`original_price` is null on every listing row.** The listing payload
-  publishes no was-price at all (0 occurrences across 405 measured rows). A
-  verified one exists on the detail page, gated on Google Finance's own
-  `doublePrice.referencePriceVerified` flag.
-* **`in_stock` is True on every listing row.** The search excludes sold-out
-  products rather than marking them (405 of 405, including pages 80-150 of a
-  large market page).
+* **`movers` returns a preview, not a ranking.** The market page publishes the
+  top one to four of each list; the standalone ranking pages redirect to it.
+* **`market_cap` and `volume` are null on indices, currencies, crypto and
+  futures.** Google writes `0` there to mean "there is none".
+* **`--window` does not deepen the chart.** Every window returns the same
+  ~20 daily bars plus one session of 5-minute bars.
 
-And two that ARE worth filing immediately, because they would mean the
-defences moved:
+And two that ARE worth filing immediately:
 
-* a run that collects the same page twice — the end-of-listing check reads
-  the offset the server states, and Google Finance re-serves page 1 under HTTP 200
-  rather than erroring;
-* `position` values that are not 1..N contiguous — the market page injects
-  slots into its own result list and the count varies between fetches, so
-  positions count emitted rows rather than payload slots.
+* any mode whose row count or non-null share drops on an unchanged symbol;
+* a wrong symbol that comes back as rows instead of `not_found`.
 
 ## Before this repository goes public
 
@@ -103,9 +97,9 @@ Then the rest of the presentation, in the order that matters:
 1. `python3 smoke_test.py` green, and the canary dispatched at least once by
    hand before anyone trusts the badge. This canary needs **no secret** and
    runs daily on a schedule, which is deliberate: the README's central claim
-   is that you need no key, no proxy and no account to read this site's
-   listings, and a scheduled, ungated, real three-page run is that claim
-   under test every morning. The family's rule that a canary which cannot
+   is that you need no key, no proxy and no account to read this site, and a
+   scheduled, ungated, real run of every mode is that claim under test every
+   morning. The family's rule that a canary which cannot
    pass must SKIP has a second half — a canary that CAN pass without a
    credential must never be gated on one, or the badge goes green every day
    while testing nothing.
@@ -126,70 +120,38 @@ Then the rest of the presentation, in the order that matters:
 
 **Add a test for the behaviour you are changing.** `smoke_test.py` is a single
 file of plain functions; its fixtures live beside it in
-`fixtures_generated.json` because on this site a fixture IS the SSR payload
-and one ad's entry is kilobytes of JSON (see `make_fixtures.py`). Copy the
+`fixtures_generated.json` because on this site a fixture IS the page's
+payload and one capture is hundreds of kilobytes (see `make_fixtures.py`). Copy the
 nearest existing check and edit it.
 
 The properties below exist because they were once absent, or were wrong in
 the repo this one was ported from, and cost real time. Tests pin all of them,
 so a PR that breaks one will fail rather than silently regress:
 
-- **The SSR payload is the primary source, and JSON-LD is a TRAP.** A
-  listing page's only `application/ld+json` is a ten-item SEO carousel whose
-  every url carries `?scid=seo-carousel-search`, while the page holds 45
-  products. It is read for exactly one thing: the currency, which no other
-  part of a listing page states.
-- **A detail page publishes a different structure entirely** — an
-  `item-page-app-data` island and a JSON-LD `BreadcrumbList`. The listing
-  parser finds nothing on it, which the suite asserts directly.
+- **The payload is found by SHAPE, never by `ds:N`.** The key numbering
+  shifts when a query parameter changes the page (`?window=5D` moves every
+  key up by one). The suite renumbers every key in a real fixture and
+  asserts that no row changes.
 - **`sku` is Google's own canonical symbol** — `TICKER:EXCHANGE` for a
   venue-traded instrument and `BASE-QUOTE` for a pair — read out of the
-  payload rather than rebuilt from the URL. The
-  payload's `variantId` is the obvious candidate and is wrong: it names the
-  pre-selected SKU inside the item and matches the URL's own code on only 39
-  of 180 measured rows. The URL tail makes ONE id work on both routes, which
-  is what lets a consumer join a listing run to a product run.
-- **Every page is UTF-8**, and the parser still honours a declared
-  charset rather than assuming one.
-  `product_parser.decode_page` is the one place that knows; the browser
-  engines never meet it, and an HTTP client that assumes UTF-8 either raises
-  or produces a whole page of replacement characters while the numbers still
-  parse.
-- **`position` counts emitted rows, not payload slots.** Google Finance injects
-  paid placements into its market lists — measured on one
-  measured page, and the count varies between fetches — so numbering by slot
-  made the same 45 products come out 1-45 in one engine and 8-52 in another.
-- **Zero is not a rating.** An unreviewed product comes back
-  `{score: 0, numReviews: 0}`, on 28 of 405 measured rows; both columns are
-  nulled together, keyed on the COUNT.
-- **A was-price is read only where the site says it may be.**
-  `doublePrice.referencePriceVerified` is Google Finance's own outcome of Japan's
-  double-pricing substantiation rule. Verified on 2 of 8 measured item
-  pages, absent with the flag false on the rest.
-- **The end of a listing is the offset the SERVER states.** Google Finance does not
-  error past its last page: `?p=151` of a 150-page query redirects to page 1
-  and serves it with HTTP 200, and a `/category/{genreId}/` URL serves page 1
-  for any `?p=` at all. Both look like success, so every fetched page is
-  checked against `pagination.start`.
-- **Complete and exhaustive are different words.** Every query is capped at
-  6,750 results — 150 pages of 45 — however many it matched, and the site
-  states both numbers. A full run of a 3-million-hit query is complete and is
-  a 0.2% sample; the sidecar carries both figures.
-- **A block here is the CLIENT, not the address.** One datacentre IP was
-  served the full catalogue by plain curl AND by headless Chromium, and
-  refused with a 43-byte deny only when a curl handshake claimed a Chrome
-  User-Agent. So `--headless` stays the default, the no-pool block budget is
-  1 rather than 3, and the block message talks about fingerprints before
-  exits.
-- **A refusal can be HTTP 200**, and there are three skins of it that do not
-  agree on a status: the 43-byte Akamai deny (200), the branded page under
-  403, and the SAME branded page under 503, which is a rate-limit throttle
-  rather than a refusal. Only the status separates the last two, and only the
-  body separates the first — so the classifier needs both and each covers the
-  other's blind spot.
-- **A UA override is what broke the pyppeteer engine**, and it is the shape
-  to watch for: served on nav 1, denied on navs 2-4. If you add a user agent
-  or a fingerprint to any engine, test it over TWO pages.
+  payload rather than rebuilt from the URL, because a URL holds whatever was
+  typed.
+- **A positional figure is mapped only after it matched the rendered page on
+  several instruments.** The financial record is unlabelled; a slot that
+  matched one company only is a coin toss, so it is left out rather than
+  guessed. Volume is not headcount, and OHLCV bars are open, close, high, low.
+- **Zero is not a measurement.** Google writes `0` for "there is none" on
+  `market_cap` and `volume`; those are nulled, never written through.
+- **A wrong symbol is `not_found`, not an empty result.** Google answers an
+  unknown symbol with HTTP 200 and a page whose chrome still carries dozens of
+  real quotes, so the parser is scoped to the requested instrument.
+- **The access axes are the client and the country.** A non-browser
+  User-Agent is redirected to `/finance/beta/unsupported` (reported as its own
+  state, never as a block); some countries get a 403 saying Finance is not
+  supported in that region, which `--market` cannot get past. A real block is
+  Google's interstitial for a badly scored address.
+- **There is no pagination.** `--pages` above 1 is refused with the reason,
+  and `--concurrency` splits symbols, not pages.
 
 ### Style
 
@@ -209,28 +171,21 @@ so a PR that breaks one will fail rather than silently regress:
 ### If your change needs a live run
 
 Most do not — the suite covers the parser, the writers, the captcha classifier
-and the CLI contract against inline fixtures. If yours genuinely needs
-google.com/finance, say in the PR what you ran, which URL and page kind, from
-which exit, and what you got — including the price and image coverage
-percentages the run prints, and the scroll trace from the sidecar. Note that
-a run from a datacentre address gets NO RESPONSE AT ALL, so "it returned
-nothing" from a VPS is not a finding. Product counts differ by category, by
-URL and by how far the scroll got, so a bare "worked for me" is not
-reproducible.
+and the CLI contract against real fixtures. If yours genuinely needs
+google.com/finance, say in the PR what you ran (mode, symbols, `--market`),
+from which country, and what you got: row count and which columns were
+null. Several figures move with the trading day (chart bars, movers), so a
+bare "worked for me" is not reproducible.
 
 **Run more than the primary engine.** "Mirror them exactly" is a design rule,
 not a verification: the first live run of the pyppeteer engine crashed on its
 FIRST fetch on a signature mismatch that four separate offline checks and 400
 green assertions had not caught.
 
-Do not add anything that submits the registration form. This project
-deliberately never does, and a captcha token proved valid by creating a real
-account is not a result worth having.
-
 ## Scope
 
-This repo scrapes **public pages** on Google Finance: genre listings, search
-listings and product pages, exactly as an anonymous visitor is served them.
+This repo scrapes **public pages** on Google Finance: quote pages and the
+market page, exactly as an anonymous visitor is served them.
 Out of scope: anything behind a login, anything that submits a form, and
 anything that defeats a protection rather than passing it the way an ordinary
 browser does.

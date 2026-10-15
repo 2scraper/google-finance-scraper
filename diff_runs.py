@@ -8,29 +8,31 @@ the identifier the README already tells people to diff on for price
 monitoring and assortment tracking, but that nothing in this repo actually
 computed.
 
-    python3 diff_runs.py --old watches.2026-09-01.json \\
-                          --new watches.2026-09-07.json
+    python3 diff_runs.py --old quotes.2026-09-01.json \\
+                          --new quotes.2026-09-07.json
 
 Typical use is a scheduled re-run of one of the four scraper engines, kept
 under a dated filename, diffed against the previous one:
 
-    python3 playwright_scraper.py --url "$URL" --out "girls_$(date +%F)"
-    python3 diff_runs.py --old "girls_$(ls -t girls_*.json | sed -n 2p)" \\
-                          --new "girls_$(date +%F).json" --out diff.json
+    python3 playwright_scraper.py --mode quote --symbols "$SYMBOLS" \\
+        --out "quotes_$(date +%F)"
+    python3 diff_runs.py --old "$(ls -t quotes_*.json | sed -n 2p)" \\
+                          --new "quotes_$(date +%F).json" --out diff.json
 
 Four buckets, each keyed on sku:
 
   added          — sku present in --new, absent from --old
-  removed        — sku present in --old, absent from --new (delisted, or just
-                   off this particular page/category run)
-  changed        — sku present in both, with a different price,
-                   original_price, discount_pct, currency or in_stock
+  removed        — sku present in --old, absent from --new (dropped from a
+                   market list, or not requested in this run)
+  changed        — sku present in both, with a different value in any data
+                   column of that mode's row class (price, prev_close,
+                   revenue, close, ...; derived from the row class)
   source_changed — sku present in both with a different price, but also a
-                   different price_source: one run got the DOM-corrected
-                   figure and the other the raw JSON-LD one, so the two are
-                   not comparable on price. Reported separately because this
-                   says something about our own two snapshots, not about the
-                   site — and --fail-on-change deliberately ignores it.
+                   different price_source: the two runs read the price from
+                   different payload records, so they are not comparable on
+                   price. Reported separately because this says something
+                   about our own two snapshots, not about the site — and
+                   --fail-on-change deliberately ignores it.
 
 A product this project's parser could not recover a sku for (None) cannot be
 matched across runs at all, so it is counted and reported separately rather
@@ -47,25 +49,6 @@ from typing import Dict, List, Optional, Tuple
 
 from output_writer import UNIQUE_BY_SKU_MODES, DEDUPE_KEY_BY_MODE
 
-# What a price monitor on Google Finance actually needs to watch, which is more
-# than the price.
-#
-# `points` and `point_rate` are in here and that is the Google Finance-specific
-# decision worth explaining: a 10x point campaign on this marketplace is
-# effectively a 10% discount that never touches the price column. A monitor
-# watching `price` alone would call a product unchanged through the whole of
-# a Super Sale. `points` was non-null on 405 of 405 measured rows, so it is
-# a column that reliably carries the signal.
-#
-# `price_max` is here because 95 of 405 rows are a RANGE — an item whose
-# variants differ — so a change in the top of the range is a real price
-# change that the bottom of it can hide. `subscription_price` likewise: it is
-# a different offer on the same product (54 of 405 rows), always below
-# `price`, and a shop can move it on its own.
-#
-# NOT tracked: `rating` and `review_count`, which drift upwards constantly
-# and would make every diff noisy, and `genre_rank`, which is the item's
-# standing in a listing this run never fetched.
 # Fields that identify a row or describe the RUN rather than the data. Never
 # compared: `scraped_at` differs on every run by construction, `url` and
 # `page`/`position` move when a list is reordered, and the key fields are
@@ -221,8 +204,7 @@ def diff_products(old: List[dict], new: List[dict],
     # those sponsored entries never become rows at all: they carry a
     # click-tracking redirect instead of a product URL and `parse_products`
     # drops them. So there is no placement column for a lifecycle bucket to
-    # key on, and porting one would be dead code that looks load-bearing
-    # (§4).
+    # key on, and porting one would be dead code that looks load-bearing.
     tracked = tracked_fields(mode)
     changed, source_changed, within_tolerance = [], [], []
     for sku in old_by_sku.keys() & new_by_sku.keys():
@@ -465,13 +447,10 @@ def parse_args():
                    help="Treat a price move smaller than PCT%% as an exchange-"
                         "rate tick rather than a price change: reported "
                         "separately and ignored by --fail-on-change. Default "
-                        "0, which is what a Google Finance run wants for two "
-                        "reasons: the site quotes JPY to every visitor so "
-                        "there is no conversion drift to absorb, and the yen "
-                        "has no subunit, so every price is a whole number and "
-                        "there is no rounding tick either. The flag is "
-                        "inherited from this scraper family; set it non-zero "
-                        "only with a reason you can state.")
+                        "0: Google Finance quotes each instrument in its own "
+                        "currency, so there is no conversion drift to absorb, "
+                        "and a move of any size in a quote is a real move. "
+                        "Set it non-zero only with a reason you can state.")
     p.add_argument("--fail-on-change", action="store_true",
                    help="Exit 1 if anything was added, removed or changed — "
                         "for a cron job that should only notify on a real diff.")

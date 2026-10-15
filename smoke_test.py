@@ -473,7 +473,7 @@ def test_unsupported_client_is_not_a_block():
 def test_marker_sets_score_zero_on_good_pages():
     group("markers, counted on pages known to be good")
     ok = True
-    # CLAUDE.md §18: a marker that matches every page is worse than no
+    # a marker that matches every page is worse than no
     # marker. Every challenge marker must score ZERO on every served
     # fixture, or it is a fact about the site rather than a signal.
     served = [n for n, f in FIXTURES.items() if "rows" in f]
@@ -704,7 +704,7 @@ def test_output_contract():
                               ChartPoint)))
     # No dead columns, checked PER ROW CLASS: every field of every class
     # must be populated on at least one row of at least one fixture, or it
-    # should not exist (CLAUDE.md §9). Pooling them across classes would let
+    # should not exist. Pooling them across classes would let
     # a dead column in one class be covered by a same-named live one in
     # another.
     populated = {}
@@ -1148,7 +1148,7 @@ def test_finish_run_exit_codes():
                     run([], blocked=True, stop_reason="blocked_sorry") == 3)
         ok &= check("zero rows from a page that WAS fetched is exit 4",
                     run([], stop_reason="completed") == 4)
-        # CLAUDE.md §25: a run that never got its page reports 5, not 4 —
+        # a run that never got its page reports 5, not 4 —
         # a dead proxy and an empty market must not be one value to a
         # pipeline. Keyed on "did the run finish", not on a named list of
         # stop reasons, because a list cannot cover a reason nobody has
@@ -1196,7 +1196,7 @@ def test_finish_run_exit_codes():
 def test_policy_constants_have_consumers():
     group("no policy constant without a consumer")
     ok = True
-    # CLAUDE.md §17: a constant carrying a paragraph of measured
+    # a constant carrying a paragraph of measured
     # justification that nothing reads is the same defect as dead code, and
     # harder to see because the prose reads like enforcement.
     sources = {}
@@ -1214,18 +1214,34 @@ def test_policy_constants_have_consumers():
                     and re.search(r"page_flow\.\w+", s)]
         ok &= check("%s is read outside page_flow (or through a function "
                     "that reads it)" % const, bool(users or indirect))
-    # SOLVES_PER_PAGE is only a cap if every call site goes through the
-    # budget. A sibling found this constant had read like a limit in every
-    # repo in the family while every engine solved twice and counted once.
+    # SOLVES_PER_PAGE is only a cap if every call site goes through ONE
+    # per-page allowance that is spent BEFORE the purchase. Counting after a
+    # successful solve let a failing solver be called two to four times
+    # against a limit of one (stubbed solver, this repo, 2026-10-14). So:
+    # every call passes the page's allowance, and inside the handler the
+    # allowance is spent textually before the solver is called. Read off
+    # disk, never behind an import, so it runs with no engine installed.
     for eng in ENGINES:
         src = sources.get(eng + ".py", "")
         if not src:
             continue
-        solves = len(re.findall(r"handle_captcha_if_present\(", src))
-        budgets = len(re.findall(r"solve_budget\(", src))
-        ok &= check("%s: every solve call site is budgeted (%d calls, %d "
-                    "budget checks)" % (eng, solves, budgets),
-                    budgets >= max(0, solves - 1))
+        calls = re.findall(r"(?<!def )handle_captcha_if_present\(([^)]*)\)", src)
+        unbudgeted = [c for c in calls if "solve_allowance" not in c]
+        ok &= check("%s: every solve call passes the page's allowance "
+                    "(%d calls, unbudgeted: %s)" % (eng, len(calls), unbudgeted),
+                    bool(calls) and not unbudgeted)
+        body = src[src.index("def handle_captcha_if_present("):]
+        body = body[:body.index("\ndef ", 1)]
+        spend, buy = body.find("budget.spend()"), body.find("solve_recaptcha(")
+        ok &= check("%s: the allowance is spent BEFORE the solver is called"
+                    % eng, 0 <= spend < buy)
+        ok &= check("%s: no call site counts a solve after the fact" % eng,
+                    "solves_bought +=" not in src)
+    b = page_flow.SolveBudget()
+    spent = [b.spend() for _ in range(3)]
+    ok &= check("SolveBudget allows exactly SOLVES_PER_PAGE purchases",
+                spent.count(True) == page_flow.SOLVES_PER_PAGE
+                and not b.left())
     return ok
 
 
@@ -1243,7 +1259,7 @@ def _module_sources():
 def test_no_undefined_names():
     group("every name resolves (the check a live run would need)")
     ok = True
-    # CLAUDE.md §10. Deliberately COARSE — it pools every binding in a file
+    # Deliberately COARSE — it pools every binding in a file
     # rather than tracking scopes — so it under-reports rather than
     # inventing problems. It earned its place during this repo's build: two
     # engines referenced `market_from_url` and `MOVER_LISTS` without
@@ -1283,7 +1299,7 @@ def test_no_undefined_names():
 def test_no_unreachable_code():
     group("no statement after a return/raise in the same block")
     ok = True
-    # CLAUDE.md §22: found the same fifteen lines in six sibling repos,
+    # Found the same fifteen lines in six sibling repos,
     # present since each one's first commit — a function whose `def` line had
     # been lost, leaving its body absorbed into the end of the function
     # above. It parses, it imports, `--help` works, compileall passes, and
@@ -1313,13 +1329,13 @@ def test_no_unreachable_code():
 def test_shared_calls_bind():
     group("every engine call into a shared module binds")
     ok = True
-    # CLAUDE.md §17's check #1, the one that earns its keep: a sibling had
+    # The family's check #1, the one that earns its keep: a sibling had
     # two of three engines calling `classify(html, url=...)` against a
     # `classify(html, status, url)` signature, and BOTH crashed on their
     # first fetch — invisible to import, --help, compileall, the
     # undefined-name walk and 400 green assertions.
     #
-    # And §22's correction to it: when a name does not exist in the callee at
+    # And the family's correction to it: when a name does not exist in the callee at
     # all, SAY SO rather than skipping it. A sibling's version resolved with
     # `getattr(mod, name, None)` and skipped anything not callable, so the
     # single loudest thing it could report was the one case it stayed silent
@@ -1390,7 +1406,7 @@ def test_shared_calls_bind():
 def test_engine_flag_parity():
     group("the three engines expose the same CLI")
     ok = True
-    # CLAUDE.md §17's check #2, asserted in BOTH directions: a new unshared
+    # The family's check #2, asserted in BOTH directions: a new unshared
     # flag fails, and so does closing a documented difference, because the
     # exception list IS the documentation.
     flags = {}
@@ -1514,7 +1530,9 @@ def test_env_example_round_trip():
     if not os.path.exists(example):
         return ok
     text = open(example, encoding="utf-8").read()
-    documented = set(re.findall(r"^([A-Z][A-Z0-9_]*)=", text, re.M))
+    # A commented-out example (`# GOOGLE_FINANCE_URL=...`) still documents
+    # the variable: it is shipped that way so it cannot pre-empt a flag.
+    documented = set(re.findall(r"^(?:#\s*)?([A-Z][A-Z0-9_]*)=", text, re.M))
     env_keys = dict(getattr(env_config, "ENV_KEYS", {}))
     read_by_code = set(env_keys)
     ok &= check("ENV_KEYS is a non-empty explicit map", bool(read_by_code))
@@ -1524,7 +1542,7 @@ def test_env_example_round_trip():
     ok &= check("every documented variable is read by the code (extra %s)"
                 % sorted(documented - read_by_code),
                 not (documented - read_by_code))
-    # A copied example must read as UNSET. CLAUDE.md §17: the placeholder
+    # A copied example must read as UNSET. The placeholder
     # check was a literal set, and the two credentialled URLs are documented
     # the way the vendor documents them, so `cp .env.example .env` produced
     # a 401 a long way from its cause.
@@ -1647,7 +1665,7 @@ def test_sample_output_matches_the_schema():
 def test_ci_checks_is_wired_up():
     group("one implementation of the credential scan, invoked from both")
     ok = True
-    # CLAUDE.md §17: three siblings shipped `.github/ci_checks.py` invoked by
+    # Three siblings shipped `.github/ci_checks.py` invoked by
     # NOTHING while tests.yml carried an inline grep doing a narrower job —
     # two sources of truth, one dead and one holed.
     script = os.path.join(REPO_ROOT, ".github", "ci_checks.py")
@@ -2015,7 +2033,7 @@ def test_one_bad_symbol_does_not_end_the_queue(skips):
             self.state = "content" if products else "not_found"
             self.blocked_by = None
             self.load_failed = False
-            self.cap = self.header = self.shop_facts = None
+            self.cap = self.header = None
 
     def fake_fetch(session, args, pool, page_num, url):
         fetched.append(url)
@@ -2254,7 +2272,7 @@ def test_many_currencies_in_one_run_is_normal_here():
 def test_no_public_function_without_a_consumer():
     group("no public function nobody calls")
     ok = True
-    # CLAUDE.md §17: a policy constant nothing reads is the same defect as
+    # a policy constant nothing reads is the same defect as
     # dead code, and harder to see because the prose reads like enforcement.
     # The same is true of a FUNCTION, and this repo had three:
     #
@@ -2332,7 +2350,7 @@ def test_canary_is_coherent():
 
     # It must need no secrets. This repo's central claim is that the site
     # needs none, and a canary gated on one would go green every day while
-    # testing nothing — CLAUDE.md §21's other half.
+    # testing nothing — the other half of the canary rule.
     ok &= check("the canary is not gated on a secret",
                 "secrets." not in wf)
     ok &= check("it runs on a schedule, not only on dispatch",
@@ -2568,6 +2586,176 @@ def test_retries_is_validated_in_every_entry_point():
     return check("--retries is validated in every entry point, so 0 is a usage error", not problems)
 
 
+def test_engine_paths_with_stubbed_drivers():
+    group("engine paths driven with stubbed drivers (no engine installed)")
+    ok = True
+    # Behaviour, not text: three defects lived in branches no offline check
+    # executed, because each needs a driver. tests/stub_engines.py replaces
+    # the driver modules in a SUBPROCESS (so the stubs cannot leak into the
+    # real-engine checks below) and drives each engine's `_fetch_one_page`.
+    proc = subprocess.run(
+        [sys.executable, os.path.join(REPO_ROOT, "tests", "stub_engines.py")],
+        capture_output=True, text=True, timeout=300)
+    try:
+        res = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        print(proc.stdout[-2000:], proc.stderr[-2000:])
+        return check("the stubbed-driver probe ran and reported", False)
+    ok &= check("pyppeteer: a navigation failure with no proxy pool ends the "
+                "page instead of crashing (%s)"
+                % res.get("pyppeteer_no_pool_load_failure"),
+                res.get("pyppeteer_no_pool_load_failure") == "ok load_failed=True")
+    for eng in ("pyppeteer", "selenium"):
+        for mode in ("markets", "movers", "earnings"):
+            got = res.get("%s state %s" % (eng, mode))
+            ok &= check("%s classifies a real --mode %s page with its mode "
+                        "(content, got %s)" % (eng, mode, got), got == "content")
+    for eng in ("playwright", "pyppeteer", "selenium"):
+        got = res.get("env url %s symbols" % eng, "")
+        ok &= check("%s: GOOGLE_FINANCE_URL in the environment does not turn "
+                    "--symbols into a usage error (%s)" % (eng, got),
+                    got.startswith("ok url=") and "MSFT" in got)
+        got = res.get("env url %s symbols+typed url" % eng, "")
+        ok &= check("%s: --symbols with a TYPED --url is still refused (%s)"
+                    % (eng, got), got == "exit 2")
+    limit = page_flow.SOLVES_PER_PAGE
+    budget = {k: v for k, v in res.items() if k.startswith("budget ")}
+    ok &= check("the solve-budget probe covered four cases", len(budget) == 4)
+    for k, v in sorted(budget.items()):
+        ok &= check("%s: a FAILING solver is called at most %d time(s) (%s)"
+                    % (k, limit, v),
+                    # Exactly the limit: zero would mean the probe never
+                    # reached the solver and proved nothing.
+                    v == "solver calls=%d (limit %d)" % (limit, limit))
+    return ok
+
+
+def test_writes_are_atomic_and_csv_is_neutralised():
+    group("atomic writes, file modes, CSV formula guard")
+    ok = True
+    import stat
+    import output_writer as ow
+    from dataclasses import fields as dc_fields
+    cls = ow.ROW_CLASS_BY_MODE["quote"]
+    blank = {f.name: None for f in dc_fields(cls)}
+    row = cls(**dict(blank, sku="X:NASDAQ", title='=HYPERLINK("http://e")',
+                     change_pct=-1.5))
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "out")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ow.finish_run([row], out, "both", False, blocked=False,
+                          stop_reason="completed", pages_requested=1,
+                          pages_completed=1, start_url="u", final_url="u",
+                          mode="quote", extra={"csv_cells_escaped": "caller"})
+        good = open(out + ".json", encoding="utf-8").read()
+        line = open(out + ".csv", encoding="utf-8").read().splitlines()[1]
+        ok &= check("a formula-shaped string cell is prefixed in the CSV",
+                    "'=HYPERLINK" in line)
+        ok &= check("a negative NUMBER stays a number in the CSV",
+                    ",-1.5," in line and "'-1.5" not in line)
+        ok &= check("the JSON keeps the site's bytes",
+                    '"=HYPERLINK' in good)
+        meta = json.load(open(out + ".meta.json", encoding="utf-8"))
+        ok &= check("the caller's `extra` wins over csv_cells_escaped",
+                    meta.get("csv_cells_escaped") == "caller")
+        with redirect_stdout(buf):
+            ow.finish_run([row], out + "2", "csv", False, blocked=False,
+                          stop_reason="completed", pages_requested=1,
+                          pages_completed=1, start_url="u", final_url="u",
+                          mode="quote")
+        meta2 = json.load(open(out + "2.meta.json", encoding="utf-8"))
+        ok &= check("csv_cells_escaped is recorded in the sidecar",
+                    meta2.get("csv_cells_escaped") == 1)
+        # A write that fails halfway must leave the previous file intact.
+        real_dump = ow.json.dump
+
+        def failing_dump(obj, f, **kw):
+            f.write('[{"partial')
+            raise OSError(28, "No space left on device")
+        ow.json.dump = failing_dump
+        try:
+            ow.write_json([row], out + ".json")
+            raised = False
+        except OSError:
+            raised = True
+        finally:
+            ow.json.dump = real_dump
+        ok &= check("a failed write raises", raised)
+        ok &= check("a failed write leaves the previous good file intact",
+                    open(out + ".json", encoding="utf-8").read() == good)
+        ok &= check("a failed write leaves no temp file behind",
+                    not [n for n in os.listdir(d) if n.endswith(".tmp")])
+        # Modes: what open() would give a NEW file, and an existing file
+        # keeps its own. A non-default umask (002) is in the matrix because
+        # the default one is where every wrong rule agrees.
+        old_umask = os.umask(0o022)
+        try:
+            for um, want in ((0o022, 0o644), (0o002, 0o664), (0o077, 0o600)):
+                os.umask(um)
+                p = os.path.join(d, "new%o.json" % um)
+                ow.write_json([row], p)
+                got = stat.S_IMODE(os.stat(p).st_mode)
+                ok &= check("a new file under umask %03o is %o (got %o)"
+                            % (um, want, got), got == want)
+            os.umask(0o022)
+            os.chmod(out + ".json", 0o640)
+            ow.write_json([row], out + ".json")
+            got = stat.S_IMODE(os.stat(out + ".json").st_mode)
+            ok &= check("an existing file keeps its mode (640, got %o)" % got,
+                        got == 0o640)
+        finally:
+            os.umask(old_umask)
+    return ok
+
+
+def test_no_private_citations_or_donor_text():
+    group("no private citations, no text about another site")
+    ok = True
+    # Assembled from pieces so this file can scan itself without matching.
+    # A citation of an instruction file the public cannot open is a pointer
+    # to nowhere; say the rule in this repo's own words instead.
+    cited = re.compile("|".join([
+        re.escape("CLAUDE" + ".md"), re.escape("claude_" + "2scraper"),
+        re.escape("2scraper_" + "repo_rules"), "play" + "book",
+        "\u00a7" + r"\s*\d"]), re.I)
+    # Words from the sites this repo's code was first written for. A message
+    # telling a Google Finance user to buy an exit in the donor site's
+    # country was one of them.
+    donor = re.compile("|".join([
+        "dub" + "izzle", "toko" + "pedia", "raku" + "ten",
+        re.escape("keyword=" + "kopi"), re.escape("country-" + "jp"),
+        re.escape("search/" + "mall"), "pro" + "duk ",
+        re.escape("Japanese " + "exit")]), re.I)
+    scanned, cite_hits, donor_hits = 0, [], []
+    for root, dirs, files in os.walk(REPO_ROOT):
+        dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")
+                   and not os.path.exists(os.path.join(root, d, "pyvenv.cfg"))]
+        for name in files:
+            path = os.path.join(root, name)
+            rel = os.path.relpath(path, REPO_ROOT)
+            if rel.startswith(".env") and rel != ".env.example":
+                continue
+            try:
+                text = open(path, encoding="utf-8").read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            scanned += 1
+            for m in cited.finditer(text):
+                cite_hits.append("%s: %r" % (rel, m.group(0)))
+            for m in donor.finditer(text):
+                donor_hits.append("%s: %r" % (rel, m.group(0)))
+    ok &= check("the citation scan read the repository (%d files)" % scanned,
+                scanned > 20)
+    ok &= check("no private instruction file or section number is cited%s"
+                % ("" if not cite_hits else " (%s)" % cite_hits[:4]),
+                not cite_hits)
+    ok &= check("no text about another site's routes, exits or fields%s"
+                % ("" if not donor_hits else " (%s)" % donor_hits[:4]),
+                not donor_hits)
+    return ok
+
+
 def main() -> int:
     ok = True
     # Checks that could not run because an optional engine library is absent.
@@ -2600,6 +2788,7 @@ def main() -> int:
     ok &= test_every_mode_is_order_independent()
     ok &= test_output_contract()
     ok &= test_finish_run_exit_codes()
+    ok &= test_writes_are_atomic_and_csv_is_neutralised()
     ok &= test_policy_constants_have_consumers()
     ok &= test_no_undefined_names()
     ok &= test_no_unreachable_code()
@@ -2607,6 +2796,7 @@ def main() -> int:
     ok &= test_engine_flag_parity()
     ok &= test_engines_import_their_driver_at_module_level()
     ok &= test_banned_wording()
+    ok &= test_no_private_citations_or_donor_text()
     ok &= test_env_example_round_trip()
     ok &= test_dockerfile_copies_what_it_imports()
     ok &= test_sample_output_matches_the_schema()
@@ -2620,6 +2810,7 @@ def main() -> int:
     ok &= test_no_public_function_without_a_consumer()
     ok &= test_canary_is_coherent()
     ok &= test_scraper_api_waitfor_object_and_http_code()
+    ok &= test_engine_paths_with_stubbed_drivers()
     ok &= test_engines(skips)
     ok &= test_concurrency_machinery(skips)
 

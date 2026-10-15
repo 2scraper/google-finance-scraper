@@ -70,13 +70,13 @@ _PLACEHOLDERS = {
 # This repo's `.env.example` documents the two credentialled URLs the way the
 # vendor documents them, with the parts you fill in written in braces:
 #
-#     ws://{login}-zone-scraping_browser-country-jp-pid-{profileId}:{password}@cb.2captcha.com:9222
+#     ws://{login}-zone-scraping_browser-country-us-pid-{profileId}:{password}@cb.2captcha.com:9222
 #     http://{user}:{password}@ap.proxy.2captcha.com:2334
 #
 # A literal-only check reported both of those as CONFIGURED, so `cp
 # .env.example .env` followed by a run connected to cb.2captcha.com with the
 # string `{login}-zone-…` as its username and got a 401 — a confusing failure
-# a long way from its cause, which is precisely what §3's rule exists to
+# a long way from its cause, which is precisely what the family's rule exists to
 # prevent. Any `{…}` left in a value means the line was never filled in.
 _BRACED_PLACEHOLDER_RE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
 
@@ -213,7 +213,7 @@ def _dests_given_on_argv(dests, argv=None):
     headful path and its Scraping Browser path are both first-class, and
     switching between them is routine rather than exceptional.
 
-    Scanning argv is the smallest fix that keeps §3's precedence intact --
+    Scanning argv is the smallest fix that keeps the family's precedence intact --
     explicit flag, then exported variable, then `.env`, then default -- with
     "explicit" now meaning what the caller typed rather than what happens to
     be truthy.

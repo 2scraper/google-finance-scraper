@@ -2,7 +2,7 @@
 
 Google Finance answers a request five ways and four of them want a different
 response, which is why this module exists rather than the same triage being
-written three times inside three engines and drifting apart (CLAUDE.md §1):
+written three times inside three engines and drifting apart:
 
     content             the payload is there and holds the instrument(s)
                         this url asked for
@@ -24,7 +24,7 @@ The page chrome carries the index and sector strips whatever the url asked
 for. So "did we get rows?" answers YES on a page holding no such instrument,
 and a classifier that counted first would report a successful quote fetch
 full of furniture. `product_parser.detect_page_state` reads the site's own
-sentence before it counts anything — CLAUDE.md §17's classification-order
+sentence before it counts anything — the family's classification-order
 trap, where a threshold was consulted ahead of an unambiguous marker.
 
 The policy lives in `STATE_POLICY` as DATA, so an engine cannot quietly
@@ -38,7 +38,7 @@ passes its own driver's primitives and keeps its browser plumbing to itself:
     content() -> Optional[str]      current HTML, None if unavailable
     sleep(ms) -> None               wait
 
-No JavaScript crosses that boundary in either direction (§1): Selenium's
+No JavaScript crosses that boundary in either direction: Selenium's
 `execute_script` takes a function BODY with an explicit `return` where
 Playwright and pyppeteer take `() => expr`, so the shared module names the
 OPERATION and the engine spells it in its own driver's dialect.
@@ -128,7 +128,7 @@ READY_SELECTOR_PRODUCT = READY_SELECTOR_QUOTE
 
 # How many matches mean "rendered".
 #
-# Must be > 1 on the list page (§5): waiting for a single match resolves on
+# Must be > 1 on the list page: waiting for a single match resolves on
 # the site's own navigation chrome long before the strips paint. Measured on
 # the 2026-09-22 captures: a served root page carries 40+ quote links and the
 # unsupported-browser page carries 0.
@@ -240,7 +240,7 @@ def classify(html: Optional[str], status: Optional[int] = None,
     Getting that wrong is not a style question: a sibling shipped two of
     three engines calling this as `classify(html, url=...)`, both crashed on
     their FIRST fetch, and nothing short of a live run or a
-    signature-binding check saw it (§17). The suite here binds every engine's
+    signature-binding check saw it. The suite here binds every engine's
     call against this signature for that reason.
 
     On this site the BODY is more load-bearing than the status, which is the
@@ -255,7 +255,7 @@ def classify(html: Optional[str], status: Optional[int] = None,
 
 
 # The retry/solve/blocked decision as DATA rather than as three copies of an
-# if-chain in three engines (§1).
+# if-chain in three engines.
 #
 #   parse    is there anything on this page worth writing down?
 #   retry    would fetching it again plausibly help?
@@ -382,7 +382,7 @@ def is_unpainted(state: str, html: Optional[str]) -> bool:
 # first.
 #
 # The engines read these constants rather than computing their own budget —
-# a policy constant nothing consults is the same defect as dead code (§17),
+# a policy constant nothing consults is the same defect as dead code,
 # and the suite asserts each one has a consumer.
 RETRY_ON_BLOCKED = True
 BLOCK_RETRIES_WITHOUT_POOL = 1
@@ -403,14 +403,14 @@ THROTTLE_BACKOFF_MS = (6_000, 15_000, 30_000)
 # That is NOT a claim that Google does not challenge scrapers. It serves
 # `/sorry/index` with a reCAPTCHA to addresses it does not like, this repo
 # recognises that page, and 2Captcha solves that task type — saying anything
-# narrower would be the mistake CLAUDE.md §19 calls the worst bug in this
+# narrower would be the mistake the family rule calls the worst bug in this
 # family, where a README told readers a key would not help on a site whose
 # captcha the vendor had solved for years.
 #
 # The cap is kept, and kept ENFORCED through `solve_budget`, because a
 # sibling found this constant had read like a limit in every repo in the
 # family while every engine called the solver twice per attempt and counted
-# once — one page bought three solves (§23).
+# once — one page bought three solves.
 SOLVES_PER_PAGE = 1
 
 
@@ -422,6 +422,33 @@ def solve_budget(spent: int) -> bool:
     call is exactly how a sibling paid three times for a one-solve cap.
     """
     return spent < SOLVES_PER_PAGE
+
+
+class SolveBudget:
+    """The per-page allowance of paid solves, spent BEFORE each purchase.
+
+    One object per page, created once outside the retry/rotation loop, so
+    neither a retry nor a fresh exit refills it. The solver call itself
+    spends it — not the caller after a success — because a solve that
+    raises (an unsolvable task, a rejected token) may still have been a
+    request to the paid API, and counting only successes let a page make
+    two to four solver requests against a limit of one.
+    """
+
+    def __init__(self, limit: Optional[int] = None):
+        self.limit = SOLVES_PER_PAGE if limit is None else limit
+        self.spent = 0
+
+    def left(self) -> bool:
+        return solve_budget(self.spent) if self.limit == SOLVES_PER_PAGE \
+            else self.spent < self.limit
+
+    def spend(self) -> bool:
+        """Claim one purchase. False (and nothing spent) when none is left."""
+        if not self.left():
+            return False
+        self.spent += 1
+        return True
 
 
 def throttle_delay_ms(attempt: int) -> int:
@@ -496,7 +523,7 @@ def block_advice(html: Optional[str], headless: bool,
 # ---------------------------------------------------------------------------
 # Pagination — there is none, and that is the contract
 # ---------------------------------------------------------------------------
-# CLAUDE.md §7 wants three layers, weakest last. On this site all three are
+# The family rule wants three layers, weakest last. On this site all three are
 # absent, and the honest thing is to say so in code rather than to ship a
 # selector that can never match:
 #
@@ -578,7 +605,7 @@ def empty_unit_ends_the_run(url: str = "") -> bool:
     A caller asking for ten instruments with one typo among them got the
     rows up to the typo and a clean exit. That is this codebase's worst
     failure class — doing less than it says while reporting success — and
-    it arrived by inheritance rather than by authorship (CLAUDE.md §16).
+    it arrived by inheritance rather than by authorship.
     """
     return False
 
@@ -630,7 +657,7 @@ def concurrency_limit(url: str = "") -> Optional[int]:
 def concurrency_refusal(url: str = "") -> Optional[str]:
     """Why per-PAGE concurrency is refused for this url, or None.
 
-    Refused with the reason (§18) rather than silently honoured as 1, which
+    Refused with the reason rather than silently honoured as 1, which
     would look like the flag did something.
     """
     reason = unsupported_reason(url)

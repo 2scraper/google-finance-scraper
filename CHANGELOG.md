@@ -10,6 +10,24 @@ release notes lead with it.
 
 ## [Unreleased]
 
+> **Behaviour changes in this release:**
+>
+> - Output files are now written atomically (a temp file in the same
+>   directory, then renamed). A new file gets the mode `open()` would have
+>   given it under your umask; an existing file keeps its own mode.
+> - In CSV output only, a text cell starting with `=`, `+`, `-`, `@`, a tab
+>   or a newline is prefixed with `'` so a spreadsheet does not run it as a
+>   formula. Numbers and the JSON output are unchanged; the sidecar's
+>   `csv_cells_escaped` says how many cells were touched.
+> - `.env.example` no longer sets `GOOGLE_FINANCE_URL` (it is shipped
+>   commented out). A `GOOGLE_FINANCE_URL` in your own `.env` no longer
+>   turns `--symbols` into a usage error; only a TYPED `--url` conflicts.
+> - A region Google does not serve Finance in (HTTP 403, "not supported in
+>   your region") is exit 3 with advice naming the exit's country; it used
+>   to end as exit 4, which means "the page loaded and was empty".
+> - A run whose loop ended normally while some symbols failed is `partial`
+>   (exit 6), not `complete`.
+>
 > **Behaviour change:** `--retries 0` is now a usage error (exit 2). It used
 > to be accepted and made the page-load loop unreachable, so nothing was
 > fetched and the engine reported the browser's own blank page as a result:
@@ -19,6 +37,35 @@ release notes lead with it.
 
 ### Fixed
 
+- **A failing captcha solver could be called up to four times for one page**
+  against `SOLVES_PER_PAGE = 1`: the call before classification counted a
+  solve only after it succeeded, so a solver error left the allowance
+  unspent and each block retry called again. The allowance is now one
+  object per page, spent before each purchase and never refilled by a retry
+  or an exit rotation. Measured with a stubbed failing solver: 2 to 4 calls
+  before, 1 after, with and without a proxy pool.
+- **pyppeteer crashed (exit 1) on an ordinary navigation timeout with no
+  proxy**: the load-failure branch rotated `pool`, which is None without
+  `--proxy`. It now rotates only when a pool exists.
+- **pyppeteer and Selenium classified markets, movers and earnings pages
+  as `empty`** because they did not pass `--mode` to the classifier, so
+  they skipped the readiness wait the Playwright engine runs. They pass it
+  now; all three engines agree on the page state.
+- **Writes were not atomic.** `open(path, "w")` truncates first, so a
+  failure halfway through a write (full disk, kill) replaced the previous
+  good `out.json` with a fragment of invalid JSON. JSON, CSV and the
+  `.meta.json` sidecar now go through one atomic writer.
+- **Text describing other sites was removed** from the issue templates,
+  CONTRIBUTING, `diff_runs.py --help`, the `--headful` help, the blocked-page
+  log message (which recommended an exit in another site's country) and the
+  pyppeteer/Selenium market-run log, which printed a result-cap sample size
+  this site does not have. Comments that cited private notes now state the
+  reason in place.
+- **`diff_runs.py` compared columns no row class here has**; it now derives
+  the tracked fields from each mode's row class, and keys rows on the mode's
+  own unique key rather than on `sku` alone.
+- **A typo in one symbol ended the whole queue**; the other symbols are now
+  fetched and the bad one is reported as `not_found`.
 - **`--retries 0` fetched nothing and called it a result.** The load loop is
   `range(1, retries + 1)`, so 0 never runs it and the engine judged
   `about:blank`. Three third-party audits of this family ran exactly that and

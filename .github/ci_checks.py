@@ -300,7 +300,7 @@ def tracked_files():
 # into pip's vendored code and flags a 32-hex string in `_elffile.py` as
 # key-shaped. Correct about the string, wrong about the file — and it is the
 # FIRST thing a new user sees from `python3 smoke_test.py`. A guard people
-# have to argue with is one they learn to suppress (CLAUDE.md §22).
+# have to argue with is one they learn to suppress.
 #
 # Deliberately NOT a narrowing of what gets scanned: an untracked file is
 # still read, because a key pasted into a scratch file beside the scripts is
@@ -411,9 +411,9 @@ def sample_check():
         failed.append("sample_output.csv header differs from output_writer.Product")
 
     if not failed:
-        discounted = sum(1 for r in rows if r.get("original_price"))
+        priced = sum(1 for r in rows if r.get("price") is not None)
         print(f"ok       {len(rows)} rows, {len(expected)} columns, "
-              f"{discounted} discounted, schema matches")
+              f"{priced} priced, schema matches")
     return failed
 
 
@@ -473,7 +473,7 @@ def secret_check():
     # bootstrapped repo before `git init`, a CI checkout with a broken
     # fetch — `git ls-files` returns nothing and the scan reported
     # "ok, 0 files scanned, nothing credential-shaped". That is the exact
-    # shape of failure CLAUDE.md §22 describes: a guard that quietly starts
+    # shape of failure the family has met before: a guard that quietly starts
     # passing once its input disappears.
     #
     # Deliberately keyed on ZERO rather than on a threshold. A repo can

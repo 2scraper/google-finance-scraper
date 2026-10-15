@@ -16,7 +16,7 @@ WHAT THE SITE SERVES
 its whole payload into `AF_initDataCallback({key: 'ds:N', data:[...]})`
 blobs — 22 to 26 of them on a quote page, 15 on the root — as plain nested
 JSON arrays, fully server-rendered. There is no JSON-LD anywhere: measured
-**zero** `application/ld+json` blocks on all 11 captures, so CLAUDE.md §4's
+**zero** `application/ld+json` blocks on all 11 captures, so the family's
 primary path does not exist here and the payload IS the primary path.
 
 NEVER ANCHOR ON `ds:N`
@@ -132,7 +132,7 @@ CURRENCY = None  # never a default; see `currency_from_page`.
 # Google's OWN refusal vocabulary. Every one of these was counted on the 11
 # captures of 2026-09-22 and scores **0 on all nine served pages**, 0 on the
 # Page Not Found page and 0 on the unsupported-browser page — which is what
-# makes them markers rather than facts about the site (CLAUDE.md §18: a
+# makes them markers rather than facts about the site (a
 # marker that matches every page is worse than no marker).
 #
 # No challenge was met in testing, from this address, across those 11
@@ -148,7 +148,7 @@ BOT_CHALLENGE_MARKERS = (
     "Our systems have detected unusual traffic",
     "unusual traffic from your computer network",
     # The widget the sorry page mounts. Specific loader paths only: a bare
-    # `captcha` or `recaptcha` marker is the trap CLAUDE.md §24 measured,
+    # `captcha` or `recaptcha` marker is the trap a sibling measured,
     # firing 21 and 2 times on a good page fetched over a managed browser
     # whose auto-solve extension injects its own hunters.
     "recaptcha/api.js",
@@ -192,7 +192,7 @@ UNSUPPORTED_MARKERS = (
 # Matched on the BODY, not only on the status, and that is deliberate:
 # selenium_scraper.py cannot obtain an HTTP status at all, so a
 # status-only rule would leave one of three engines calling this `unknown`
-# and retrying it. CLAUDE.md §8: take the status where it is available and
+# and retrying it. Take the status where it is available and
 # find a STRUCTURAL signal for where it is not.
 REGION_MARKERS = (
     "not supported in your region",
@@ -200,7 +200,7 @@ REGION_MARKERS = (
 )
 
 # A served page is built out of the site's own assets; an interstitial is
-# not. CLAUDE.md §8's structural secondary signal, and on this site the
+# not. The family's structural secondary signal, and on this site the
 # asset host is unambiguous — measured 40 to 130 references on every served
 # capture and 0 on neither refusal page, which both DO carry it, so this is
 # used only to tell a served page from a network error page (Chromium's own
@@ -441,7 +441,7 @@ def _nonzero(v: Any) -> Optional[float]:
 
     Measured 2026-09-22: `market_cap` is 0 on the index, currency, crypto and
     futures captures and `volume` is 0 on the currency and crypto ones — a
-    sentinel, not a measurement. CLAUDE.md §21's "zero is not a rating",
+    sentinel, not a measurement. The family's "zero is not a rating",
     which cost a sibling every average its consumers computed.
     """
     n = _num(v)
@@ -756,7 +756,7 @@ def parse_movers(html: Optional[str], url: str = "", *,
 #
 # What it states: the sector blob's data opens with the literal string
 # "sectors", followed by the group's entity ids and its own title ("Equity
-# sectors"). Membership of that node is the signal — CLAUDE.md §17's rule
+# sectors"). Membership of that node is the signal — the family's rule
 # that signals are ordered by how much they PROVE, not by how cheap they
 # are.
 _SECTOR_GROUP_MARKER = "sectors"
@@ -1379,7 +1379,7 @@ def parse_products(html: Optional[str], url: str = "", page: Optional[int] = Non
 def _unescaped_head(html: Optional[str], limit: int = 200_000) -> str:
     """A bounded, entity-normalised prefix.
 
-    CLAUDE.md §20: an edge can entity-escape the punctuation in its own
+    An edge can entity-escape the punctuation in its own
     refusal page, so a literal marker matches the browser's serialisation and
     silently misses the HTTP client's. Bounded because unescaping 1.4 MB on
     every fetch buys nothing and risks a company name deep in a payload
@@ -1454,7 +1454,7 @@ def is_region_unavailable(html: Optional[str]) -> bool:
 def served_by_google(html: Optional[str]) -> bool:
     """Was this built out of Google Finance's own assets?
 
-    The positive-asset check CLAUDE.md §8 and §18 both arrive at. Its job
+    The positive-asset check this family arrived at twice. Its job
     here is Chromium's own network-error page, which carries the site's
     hostname in its `<title>` — so a title check calls it a real page — and
     none of the site's assets.
@@ -1491,7 +1491,7 @@ def detect_page_state(html: Optional[str], status: Optional[int] = None,
     """One of: content | not_found | unsupported_client | blocked | empty |
     unknown.
 
-    ORDER IS THE WHOLE POINT, and it is CLAUDE.md §17's classification-order
+    ORDER IS THE WHOLE POINT, and it is the family's classification-order
     trap taken seriously: the unambiguous positive signals are read before
     any threshold or count.
 
@@ -1621,8 +1621,8 @@ def canonical_url(url: str) -> str:
 def paginates_by_url(url: str = "", html: Optional[str] = None) -> bool:
     """False, always, and deliberately not a stub.
 
-    CLAUDE.md §7 says pagination must never depend solely on selectors and
-    §18 adds that one page kind may have no per-page addresses at all. Google
+    The family rule says pagination must never depend solely on selectors
+    and adds that one page kind may have no per-page addresses at all. Google
     Finance is the case where NO page kind has them: a quote page is one
     instrument, and the root page's lists are whatever it publishes, with the
     seven former `/markets/*` urls now redirecting to it.
@@ -1705,7 +1705,7 @@ def market_metadata(html: Optional[str], url: str = "") -> Dict[str, Any]:
     `market` is load-bearing rather than decorative: the root page's lists
     are geo-selected, so two runs under different `gl` values are different
     SAMPLES and not a change in the data. `diff_runs.py` refuses to compare
-    across it for the same reason CLAUDE.md §21 makes a sibling refuse to
+    across it for the same reason the family rule makes a sibling refuse to
     compare two sort orders.
     """
     return {
