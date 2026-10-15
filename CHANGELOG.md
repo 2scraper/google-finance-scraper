@@ -52,6 +52,13 @@ release notes lead with it.
   applies unchanged) and recognises a figure record by its currency and
   period-end slots rather than by its exact width. gl=DE still sends the
   dense form; both are pinned by fixtures cut from 2026-10-14/15 pages.
+- **`--mode movers` returned 0 rows (exit 4) whenever Google sent one of
+  the three lists as null** — before the US open (`[null, null, [4
+  most-active]]`, 2026-10-15) and early in a session (gl=DE had no gainers
+  yet). The lists that are present are read now; the gainers/losers labels
+  are checked on whichever of the two is present and fall back to
+  positional names (`movers_N`) when neither is. Those most-active rows no
+  longer leak into `--mode markets` either.
 - **`--mode financials` dropped every detailed quarter of a bank.** BAC:NYSE
   publishes its detailed quarters 105 slots wide, not 106, so its newest row
   was 2024 Q2. They are read now (8 detailed quarters); the 2026 Q2 and Q1

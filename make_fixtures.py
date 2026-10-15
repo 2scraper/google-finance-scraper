@@ -124,6 +124,12 @@ SOURCES: Dict[str, Tuple[str, str, str]] = {
                           "https://www.google.com/finance/?hl=en&gl=DE"),
     # A bank's detailed quarters arrive 105 slots wide, not 106 (trailing
     # empty slots trimmed); the exact-width rule dropped all eight of them.
+    # The movers blob with null lists: gl=US before the open (the canary's
+    # 2026-10-15 12:51 UTC dump) and gl=DE early in its session.
+    "movers_us_premarket": ("markets_us_2026-10-15_premarket.html", "movers",
+                            "https://www.google.com/finance/beta/?gl=US&hl=en"),
+    "movers_de_partial": ("markets_de_2026-10-15.html", "movers",
+                          "https://www.google.com/finance/?hl=en&gl=DE"),
     "financials_bank": ("quote_bank_us_2026-10-15.html", "financials",
                         "https://www.google.com/finance/quote/BAC:NYSE"),
 }

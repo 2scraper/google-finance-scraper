@@ -984,6 +984,23 @@ def test_sparse_figure_records():
     ok &= check("BAC 2026 Q1 matches the rendered table",
                 q1 is not None and q1.revenue == 28935000000.0
                 and q1.operating_expense == 18531000000.0)
+    # The movers blob with NULL lists. Before the US open (2026-10-15 12:51
+    # UTC) it was [null, null, [4 most-active]]; gl=DE early in its session
+    # was [null, [4 losers], [4 most-active]]. Requiring three populated
+    # lists returned 0 movers (exit 4) on both.
+    pre = _rows("movers_us_premarket")
+    ok &= check("movers before the open: the 4 rows that ARE published",
+                len(pre) == 4)
+    ok &= check("... labelled positionally, since no gainers/losers list "
+                "exists to verify the labels against",
+                {r.listing for r in pre} == {"movers_2"})
+    part = _rows("movers_de_partial")
+    ok &= check("movers with no gainers yet: 4 losers + 4 most-active",
+                len(part) == 8
+                and sum(1 for r in part if r.listing == "losers") == 4
+                and sum(1 for r in part if r.listing == "most_active") == 4)
+    ok &= check("... and every loser is down",
+                all(r.change_pct < 0 for r in part if r.listing == "losers"))
     # The decoder itself, on the three shapes and on what it must refuse.
     ok &= check("sparse decoding puts field N at slot N-1",
                 pp._jspb_dense([1, {"3": "c"}]) == [1, None, "c"]

@@ -681,7 +681,11 @@ def _movers_labels_hold(sublists: Sequence[Sequence[Sequence[Any]]]) -> bool:
         return rec[5][2] if isinstance(rec[5], list) and len(rec[5]) > 2 else None
     g = [pct(r) for r in gainers if pct(r) is not None]
     l = [pct(r) for r in losers if pct(r) is not None]
-    if not g or not l:
+    # A list Google sent as null (before the open, or early in a session —
+    # gl=DE at 12:49 UTC on 2026-10-15 had no gainers yet) cannot contradict
+    # the labels; the invariant is checked on whichever lists are present,
+    # and at least one of the two has to be there to check at all.
+    if not g and not l:
         return False
     return all(x > 0 for x in g) and all(x < 0 for x in l)
 
@@ -690,19 +694,25 @@ def _mover_sublists(data: Dict[str, Any]) -> List[List[list]]:
     """The movers blob: the one whose data is exactly three sub-lists, each
     holding instrument records.
 
-    Found by shape, and the tie-break is the largest total — the root page
-    carries other three-element lists, and the one that is three POPULATED
-    lists of instruments is the movers strip. `gl=BR` returns a root page
-    with no such blob at all, which is why an absent list is an empty result
-    and never a failure.
+    Found by shape, and the tie-break is the largest total. A list may be
+    NULL: before the US open on 2026-10-15 the gl=US blob was
+    `[null, null, [4 most-active]]`, and gl=DE early in its session was
+    `[null, [4 losers], [4 most-active]]`. Requiring three populated lists
+    (the first version) returned 0 movers on both, and pushed the
+    most-active rows into `--mode markets`. So: exactly three slots, each
+    null or a list, at least one holding instrument records. `gl=BR` returns
+    a root page with no such blob at all, which is why an absent list is an
+    empty result and never a failure.
     """
     best: List[List[list]] = []
     best_total = 0
     for value in data.values():
-        if not isinstance(value, list) or len(value) != 3:
+        if (not isinstance(value, list) or len(value) != 3
+                or not all(sub is None or isinstance(sub, list)
+                           for sub in value)):
             continue
-        subs = [_compact_records({"_": sub}) for sub in value]
-        if not all(subs):
+        subs = [_compact_records({"_": sub}) if sub else [] for sub in value]
+        if not any(subs):
             continue
         total = sum(len(s) for s in subs)
         if total > best_total:
