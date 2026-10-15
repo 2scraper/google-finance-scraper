@@ -126,7 +126,7 @@ STATE_SOURCES: Dict[str, Tuple[str, str, str, str]] = {
 }
 
 # Patterns, not literals. Guarding with the values one capture happened to
-# contain is how the next capture ships unscrubbed (CLAUDE.md §10).
+# contain is how the next capture ships unscrubbed.
 SECRET_PATTERNS = (
     (re.compile(r'\b[A-Fa-f0-9]{32}\b'), "<32-HEX-REDACTED>"),
     (re.compile(r'(SAPISID|SSID|HSID|SID|APISID)=[^;"\s]+'), r"\1=<REDACTED>"),

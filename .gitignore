@@ -15,8 +15,8 @@
 # real captures, verified to parse identically to them and scrubbed;
 # it has to be IN the repo or the suite cannot run on a clean clone.
 !fixtures_generated.json
-dubizzle_listings.*
-dubizzle_listings_*.*
+google_finance.*
+google_finance_*.*
 
 # --- the live-test harness's working directory ---------------------------
 # `--dump-html PATH` writes PATH.page1, PATH.page2, ... — FILES, not a
@@ -99,7 +99,7 @@ secrets*
 # recoverable only because that repo was private at the time. On 2026-09-17
 # a sibling had an untracked `.env.bak` holding a 32-hex key in a PUBLIC
 # repository, one `git add -A` from publication. Craigslist was fixed then
-# and the fix never reached anyone else, which is §16's rule unapplied: when
+# and the fix never reached anyone else, which is a rule left unapplied: when
 # you fix one, check the siblings.
 .env*
 !.env.example

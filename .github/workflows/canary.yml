@@ -160,10 +160,13 @@ jobs:
 
       - name: Interpret the exit codes
         id: verdict
-        # ACCESS CONDITIONS ARE NOT DEFECTS — failing the job on any non-zero
-        # exit would make the canary red for things that are nobody's bug.
-        # So 3 (blocked) and 6 (partial) are WARNINGS, while a run that got
-        # in and found the wrong thing stays red.
+        # This canary needs no credential and is expected to reach the site
+        # from a bare runner, so a run that did NOT reach it tested nothing
+        # and must not end green: exit 3 (blocked) is an ERROR here. A green
+        # badge on a blocked run would say "the site still works" with no
+        # evidence. Exit 6 (partial: some symbols failed) is a warning, and
+        # the row checks below still run on what came back, so a partial
+        # run passes only if the data it did get is right.
         #
         # Exit 5 is a DEFECT here, not an access condition, and that differs
         # from the siblings on purpose: they warn on it because their
@@ -173,7 +176,6 @@ jobs:
         # cannot have.
         run: |
           set -e
-          tested=true
           for pair in "markets:${{ steps.markets.outputs.exit_code }}" \
                       "quotes:${{ steps.quotes.outputs.exit_code }}" \
                       "movers:${{ steps.movers.outputs.exit_code }}" \
@@ -184,12 +186,11 @@ jobs:
               0)
                 echo "OK — $name parsed from a live run." ;;
               3)
-                tested=false
-                echo "::warning::$name was blocked before parsing (exit 3) — reported as an ACCESS condition rather than a code defect, so this run is not failed. On this site that is NOT routine: 11 fetches from a datacentre address met no challenge at all. If it repeats, Google has begun scoring GitHub's ranges. Check the HTML dump: if it is the /finance/beta/unsupported page then this is not an address problem at all, it is a User-Agent one."
-                echo "### $name did NOT test anything (exit 3, blocked)" >> "$GITHUB_STEP_SUMMARY" ;;
+                echo "::error::$name was blocked before parsing (exit 3), so this run did not test the site. This canary needs no credential and reached the site from GitHub's runners until now: if it repeats, Google has begun refusing GitHub's ranges (or their region). Check the HTML dump: the /finance/beta/unsupported page would mean a User-Agent problem, not an address one."
+                echo "### $name did NOT test anything (exit 3, blocked)" >> "$GITHUB_STEP_SUMMARY"
+                exit 1 ;;
               6)
-                tested=false
-                echo "::warning::$name was partial (exit 6) — some rows were gathered and the run then stopped early. The sidecar names which fetches failed."
+                echo "::warning::$name was partial (exit 6) — some rows were gathered and the run then stopped early. The sidecar names which fetches failed; the row checks below still run on what came back."
                 echo "### $name tested only PART of the run (exit 6)" >> "$GITHUB_STEP_SUMMARY" ;;
               4)
                 echo "::error::$name ran fine but parsed 0 rows (exit 4). The AF_initDataCallback payload has moved or changed shape. This is the regression this canary exists to catch — the HTML dump in the artefacts tells you which. If the dump says 'Page Not Found', a symbol in the workflow is wrong rather than the parser."
@@ -205,10 +206,8 @@ jobs:
                 exit 1 ;;
             esac
           done
-          echo "tested=$tested" >> "$GITHUB_OUTPUT"
 
       - name: Check what the runs actually produced
-        if: steps.verdict.outputs.tested == 'true'
         # Thresholds are MEASURED figures with a margin, not round numbers
         # someone liked. Each is the number from the live runs recorded in
         # the README, floored enough to survive Google rotating which
@@ -274,8 +273,11 @@ jobs:
           qmeta = json.load(open("canary_quotes.meta.json"))
           quotes = json.load(open("canary_quotes.json"))
 
-          want("quote status is not complete (%s)" % qmeta.get("status"),
-               qmeta.get("status") == "complete",
+          # `partial` is allowed here and only here: one symbol dropping out
+          # is warned about below, and the rows that DID come back are still
+          # checked. A failed or missing run is not.
+          want("quote status is %s" % qmeta.get("status"),
+               qmeta.get("status") in ("complete", "partial"),
                "stop_reason=%s" % qmeta.get("stop_reason"))
           # THE check this job exists for: the symbol loop is this repo's
           # equivalent of pagination, so a run that quietly stopped after

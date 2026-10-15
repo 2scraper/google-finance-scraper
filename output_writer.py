@@ -3,35 +3,19 @@ output_writer.py
 -----------------
 Shared row models + JSON/CSV writers used by all three scrapers.
 
-Two modes, one row shape
-------------------------
-    --mode listing   a keyword search or a genre listing -> Product
-    --mode product   one item.google.com/finance/{shop}/{code}/ page -> Product,
-                     with the detail-only fields populated
+Seven modes, five row classes
+-----------------------------
+    --mode quote | markets | movers   -> Quote
+    --mode financials                 -> Financial
+    --mode analysts                   -> AnalystRating
+    --mode earnings                   -> EarningsEvent
+    --mode chart                      -> ChartPoint
 
-Both modes yield the SAME class, and on this site that is load-bearing
-rather than tidy. Google Finance states a product's identity as
-`{shopCode}:{manageNumber}` — the detail page publishes it as
-`<meta itemprop="sku">` and it is recoverable from the URL on both routes —
-so a listing row and a product row for the same product carry a
-byte-identical `sku` and a consumer can JOIN the two files on it. Verified
-live: a product run of `sawaicoffee-tea:solandluna` and a genre listing run
-that happened to contain it agreed on the id exactly.
-
-What that does NOT buy is a cross-mode DIFF, and `diff_runs.py` still
-refuses one (`--force` overrides). The ids line up; the row SETS do not. A
-90-row listing run against a 1-row product run would report 89 products
-removed, and every line of it would be an artefact of the two runs covering
-different things. Same reasoning as the family's refusal to diff a partial
-run: the join key being right is necessary and not sufficient.
-
-There is deliberately no `--mode shop`. A merchant's storefront at
-`www.google.com/finance/{shopCode}/` looks like it should be a third mode and is
-not: its `__INITIAL_STATE__.state.data` is EMPTY and it carries no
-`the payload` payload at all (measured 2026-09-21), so the mode would need
-a second parser written against markup nobody has captured. A mode that
-ships untested is worse than a mode that is absent — `product_parser`
-refuses that URL with that reason instead.
+Every class opens with the same five columns (`source`, `scraped_at`, `url`,
+`sku`, `title`), so `sku` (Google's canonical TICKER:EXCHANGE or BASE-QUOTE)
+joins any mode to any other. What that does NOT buy is a cross-mode DIFF:
+`diff_runs.py` refuses one (`--force` overrides), because two modes cover
+different things and every line of such a diff would be an artefact.
 
 `Product` keeps the family's first eighteen columns in the family's order,
 with Google Finance's own ones appended after `position`, so a consumer written
@@ -41,8 +25,11 @@ Everything below is row-class-agnostic: pass `row_cls` so an empty CSV still
 gets the right header for the mode that produced it.
 """
 
+import contextlib
 import csv
 import json
+import os
+import tempfile
 from dataclasses import dataclass, asdict, field, fields
 from datetime import datetime, timezone
 from typing import Optional, List, Set, Sequence, Any, Type, Union
@@ -73,7 +60,7 @@ class Quote:
 
     The prefix stops at `title` deliberately. The commerce columns the older
     repos carry — brand, original_price, discount_pct, rating, review_count,
-    in_stock, image_url — have no referent on a quote, and CLAUDE.md §9 says
+    in_stock, image_url — have no referent on a quote, and the family rule says
     a column that is null on every row of every run should not exist. The
     non-commerce siblings settled this before this repo existed: wellfound
     (jobs) and quora (answers) both keep exactly these five and then go their
@@ -86,7 +73,7 @@ class Quote:
         that have no such figure — 0 on the index, currency and crypto
         captures of 2026-09-22. Written through, that zero drags any average
         a consumer computes, so both are nulled at the sentinel and a check
-        pins that no row carries a zero in either. CLAUDE.md §21's "zero is
+        pins that no row carries a zero in either. The family's "zero is
         not a rating", on a fourth site.
       * `prev_close` is NOT mapped onto the family's `original_price`. It is
         not a was-price: a quote below its previous close is not discounted,
@@ -125,7 +112,7 @@ class Quote:
     price: Optional[float] = None
     # ISO 4217, as the payload states it. Null on indices, which Google
     # publishes without one — an index level is not money. Never defaulted to
-    # "USD" (CLAUDE.md §4's currency ladder: absent is null, not a guess).
+    # "USD" (the family's currency ladder: absent is null, not a guess).
     currency: Optional[str] = None
 
     # --- Google Finance's own ------------------------------------------
@@ -204,7 +191,7 @@ class Quote:
 # ---------------------------------------------------------------------------
 # The mode-C row classes
 # ---------------------------------------------------------------------------
-# Four more kinds of thing, four more dataclasses. CLAUDE.md §9 allows this —
+# Four more kinds of thing, four more dataclasses. The family schema rule allows this —
 # "a repo that genuinely reads more than one KIND of thing may add a second
 # dataclass" — and sets the conditions, all of which are met here: the family
 # prefix stays byte-identical and in order, `sku` keeps meaning the
@@ -556,21 +543,97 @@ LIST_CSV_SEPARATOR = " | "
 def _csv_value(v: Any) -> Any:
     if isinstance(v, (list, tuple)):
         return LIST_CSV_SEPARATOR.join(str(x) for x in v)
-    # `tags` and each entry of `variants` are mappings, and a Python repr
-    # of one is neither readable in a spreadsheet nor parseable by anything
-    # but Python.
-    # Compact JSON is both, and round-trips through json.loads.
+    # A mapping becomes compact JSON: readable in a spreadsheet and
+    # round-trippable through json.loads, where a Python repr is neither.
     if isinstance(v, dict):
         return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
     return v
 
 
+@contextlib.contextmanager
+def _atomic(path: str, newline: Optional[str] = None):
+    """Write to a temporary file beside `path`, then rename over it.
+
+    `open(path, "w")` truncates before a single byte is written, so a crash,
+    a kill, a full disk or a Ctrl-C halfway through `json.dump` leaves a
+    SHORTER file where a complete one was, and the previous good run is
+    destroyed by the attempt to replace it. Reproduced here before the fix:
+    a 748-byte good `out.json` came back as 13 bytes of invalid JSON after
+    an injected write error. The sidecar matters most, because it is the
+    file a consumer branches on.
+
+    * the temp file goes in the target's OWN directory, because
+      `os.replace` is atomic only within one filesystem;
+    * `fsync` before the rename makes the bytes durable, not merely visible;
+    * `newline` is passed through because the csv module needs
+      `newline=""` to survive the move into the temp file.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline=newline, dir=directory,
+        prefix=os.path.basename(path) + ".", suffix=".tmp", delete=False)
+    try:
+        with handle:
+            yield handle
+            handle.flush()
+            os.fsync(handle.fileno())
+        # `NamedTemporaryFile` creates at 0600 and `os.replace` keeps that
+        # mode, so without this every output would be readable by its owner
+        # alone. An existing target keeps its OWN mode (someone may have
+        # tightened it on purpose); a new one gets exactly what `open()`
+        # would have given it under the current umask. Never a flat 0o644:
+        # that narrows 0664 to 0644 under umask 002.
+        try:
+            mode = os.stat(path).st_mode & 0o777
+        except OSError:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(handle.name, mode)
+        os.replace(handle.name, path)
+    except BaseException:
+        # Including KeyboardInterrupt: an interrupted run must not leave
+        # `out.json.ab12cd.tmp` behind beside the good file.
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+        raise
+
+
+# A spreadsheet treats a cell beginning with one of these as a FORMULA rather
+# than as text. Most strings here are Google's own (names, headlines, analyst
+# and news text), but a headline is third-party text and a CSV opened in a
+# spreadsheet should never execute it. The tab and newlines are listed because
+# some readers strip a leading one and then evaluate whatever followed.
+CSV_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r", "\n")
+
+# Excel, Google Sheets and LibreOffice read a leading apostrophe as "the rest
+# of this cell is text". A consumer parsing the file with the `csv` module
+# does see it, which is why the count goes into the sidecar.
+CSV_FORMULA_ESCAPE = "'"
+
+
+def _csv_escape(v: Any):
+    """Neutralise a formula-shaped cell. Returns (value, was_escaped).
+
+    Only STRINGS are touched: escaping a number would turn `-1.25`
+    (`change_pct` on a falling quote) into text and break every sum over the
+    column. CSV only: the JSON output keeps the site's bytes, and
+    `csv_cells_escaped` in the sidecar declares the divergence.
+    """
+    if isinstance(v, str) and v.startswith(CSV_FORMULA_LEADS):
+        return CSV_FORMULA_ESCAPE + v, True
+    return v, False
+
+
 def write_json(rows: Sequence[Any], path: str) -> None:
-    with open(path, "w", encoding="utf-8") as f:
+    with _atomic(path) as f:
         json.dump([asdict(r) for r in rows], f, ensure_ascii=False, indent=2)
 
 
-def write_csv(rows: Sequence[Any], path: str, row_cls: Type = Product) -> None:
+def write_csv(rows: Sequence[Any], path: str, row_cls: Type = Product) -> int:
+    """Write the CSV; return how many cells were formula-escaped."""
     # An empty result still gets the header row. A zero-byte file makes a
     # consumer fail on read (no columns to parse) instead of reading a valid
     # table with zero rows — and "an empty result is still a well-formed
@@ -579,11 +642,20 @@ def write_csv(rows: Sequence[Any], path: str, row_cls: Type = Product) -> None:
     # The header comes from `row_cls`, not from the first row, so an empty
     # run still writes the columns of the mode that produced it.
     fieldnames = [f.name for f in fields(row_cls)]
-    with open(path, "w", encoding="utf-8", newline="") as f:
+    escaped = 0
+    with _atomic(path, newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for r in rows:
-            writer.writerow({k: _csv_value(v) for k, v in asdict(r).items()})
+            row = {}
+            for k, v in asdict(r).items():
+                # AFTER the list/dict serialiser: the joined cell is text too,
+                # and its first element can be formula-shaped.
+                value, was_escaped = _csv_escape(_csv_value(v))
+                escaped += was_escaped
+                row[k] = value
+            writer.writerow(row)
+    return escaped
 
 
 # Exit code used when a run completes but produced nothing. Distinct from 1
@@ -595,19 +667,12 @@ EXIT_NO_PRODUCTS = 4
 # search genuinely matched nothing" from "something stood between us and the
 # content". See product_parser.detect_bot_challenge.
 #
-# On this site this code specifically does NOT cover the three ways to get a
-# real page with no products on it: a `/p/<slug>` discovery hub, which
-# answers 200 with banners and carousels and no grid; a search whose query
-# matches nothing ("Oops, produk nggak ditemukan"); and one page past the
-# end of a category listing. All three are EXIT_NO_PRODUCTS — the request
-# was served exactly as asked and simply has no products on it. Reporting
-# any of them as blocked would send a user hunting for a proxy problem that
-# does not exist.
-#
-# What EXIT_BLOCKED means here is unusually literal: this site refuses a
-# address it has scored NOTHING at all. No status code, no interstitial, no
-# vendor marker — the HTTP/2 stream is reset and the run sees a connection
-# error rather than a page.
+# On this site it covers a regional refusal (HTTP 403, "Google Finance is
+# currently not supported in your region") and Google's interstitial for a
+# badly scored address. It does NOT cover an unknown symbol (Google's own
+# Page Not Found, reported as `not_found`) or an unsupported-client redirect:
+# those are answers about the request, and reporting them as blocked would
+# send a user hunting for a proxy problem that does not exist.
 EXIT_BLOCKED = 3
 
 # Exit code for a run that gathered SOME rows and then stopped early — a
@@ -668,7 +733,7 @@ def write_run_meta(out_prefix: str, meta: dict) -> str:
     both complete, and between runs of different `mode`.
     """
     path = f"{out_prefix}.meta.json"
-    with open(path, "w", encoding="utf-8") as f:
+    with _atomic(path) as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
     print(f"[+] Wrote run metadata -> {path} (status={meta.get('status')})")
     return path
@@ -688,21 +753,15 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
       failed   — nothing was gathered at all
 
     `mode` and `source` are recorded because `mode` is not implied by the
-    repo: the same output prefix can hold a listing run or a product run,
-    and those populate different columns — `sold` is a FLOOR on a listing
-    row and exact on a product row, so diffing one against the other would
-    report every row as changed. diff_runs.py refuses a pair whose modes or
-    sources differ. `source` is `google.com/finance` on every row of every run
-    here, since the site has one storefront and one currency; it is kept
-    because consumers read these columns by name across the family.
+    repo: the same output prefix can hold a run of any of seven modes, and
+    they write different row classes. diff_runs.py refuses a pair whose modes
+    or sources differ. `source` is `google.com/finance` on every row of every
+    run here; it is kept because consumers read these columns by name across
+    the family.
 
-    `extra` carries facts about the run that are not about any single row.
-    `--mode shop` uses it for the SELLER's own name, location, rating and
-    review count: a run covers exactly one shop, so those belong to the run
-    rather than repeated down a column, and the shop's review count (16679
-    on the captured seller) is a different number from its listings' own
-    (827 on one of them) — putting them in one column would make the schema
-    lie.
+    `extra` carries facts about the run that are not about any single row:
+    the market asked for, the symbols requested against those returned, and
+    `csv_cells_escaped`.
 
     `pages_failed` lists the pages that did not yield data, by number.
     `pages_completed` alone was enough only while pages were fetched strictly
@@ -726,14 +785,15 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
     }
     if extra:
         # Merged rather than nested under a key, so a consumer reads
-        # `shop_rating` at the top level beside `products`. Run fields win a
+        # `market` at the top level beside `products`. Run fields win a
         # name collision: a caller cannot accidentally overwrite `status`.
         meta.update({k: v for k, v in extra.items() if k not in meta})
     return meta
 
 
 def save(rows: Sequence[Any], out_prefix: str, fmt: str,
-         allow_empty: bool = False, row_cls: Type = Product) -> int:
+         allow_empty: bool = False, row_cls: Type = Product,
+         stats: Optional[dict] = None) -> int:
     """Write JSON/CSV and return a process exit code.
 
     Returns 0 when rows were written, EXIT_NO_PRODUCTS when there were none.
@@ -760,8 +820,17 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
         write_json(rows, f"{out_prefix}.json")
         print(f"[+] Saved {len(rows)} products -> {out_prefix}.json")
     if fmt in ("csv", "both"):
-        write_csv(rows, f"{out_prefix}.csv", row_cls=row_cls)
+        escaped = write_csv(rows, f"{out_prefix}.csv", row_cls=row_cls)
         print(f"[+] Saved {len(rows)} products -> {out_prefix}.csv")
+        # Reported through `stats`, because this function returns an EXIT
+        # CODE. The caller threads it into the sidecar.
+        if stats is not None:
+            stats["csv_cells_escaped"] = escaped
+        if escaped:
+            print(f"[!] {escaped} CSV cell(s) began with a formula character "
+                  f"and were prefixed with {CSV_FORMULA_ESCAPE!r} so a "
+                  f"spreadsheet reads them as text. The JSON output is "
+                  f"unchanged — see csv_cells_escaped in the sidecar.")
     return 0 if rows else EXIT_NO_PRODUCTS
 
 
@@ -773,22 +842,11 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
 # the DATA (a page contributed nothing not already seen, so the listing is
 # over), while the second is a property of a CSS SELECTOR and is therefore
 # the weaker signal — a renamed attribute looks identical to a short
-# catalogue. On this site that ordering is not a preference, it is the only
-# thing that works: the site publishes NO `link[rel=next]` and no numbered
-# anchors anywhere, a CATEGORY listing is addressable by `?page=N`, and a
-# SEARCH is not addressable at all — `?page=2` there returns an empty result
-# set rather than page 2. So "no new products" is the one termination
-# condition available on a search. See page_flow.pagination_is_addressable.
-#
-# "single_page_mode" is complete by construction: --mode product reads one
-# page because one page is all there is.
-# `end_of_listing` is a COMPLETE result and leaving it out of this tuple is a
-# bug worth naming, because it produced exit 6 for a correct run. On this
-# site a listing does not end with an error or an empty page: Google Finance answers
-# a request past the last page by serving page 1 again under HTTP 200, and
-# the engine detects that from the offset the server states rather than from
-# its own request. Having found the real end of the results, the run has
-# everything the site will give it.
+# catalogue. This site has no pagination at all (see
+# page_flow.pagination_is_addressable), so the engines here end with
+# "completed"; the other names are kept so the shared contract reads the same
+# across the family. "single_page_mode" and "end_of_listing" are complete by
+# construction.
 COMPLETE_STOP_REASONS = ("completed", "pagination_exhausted", "no_new_products",
                          "single_page_mode", "end_of_listing")
 
@@ -826,7 +884,9 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     # names has a hole for every name nobody added to it.
     complete = stop_reason in COMPLETE_STOP_REASONS and not pages_failed
     row_cls = ROW_CLASS_BY_MODE.get(mode, Product)
-    rc = save(rows, out_prefix, fmt, allow_empty=allow_empty, row_cls=row_cls)
+    write_stats: dict = {}
+    rc = save(rows, out_prefix, fmt, allow_empty=allow_empty, row_cls=row_cls,
+              stats=write_stats)
     wrote_output = bool(rows) or allow_empty
 
     if wrote_output:
@@ -837,7 +897,10 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
             pages_requested=pages_requested, pages_completed=pages_completed,
             pages_failed=pages_failed, mode=mode, source=source,
             start_url=start_url, final_url=final_url, products=len(rows),
-            extra=extra))
+            # UNDER the caller's `extra`, never over it: a collision must not
+            # let housekeeping drop something the run recorded.
+            extra=({**write_stats, **(extra or {})} if write_stats
+                   else extra)))
 
     if not rows:
         # Nothing gathered at all, and WHY decides the code. The three

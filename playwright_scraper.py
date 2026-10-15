@@ -166,10 +166,6 @@ class PageOutcome:
     # site has none — every url addresses exactly one thing — so it is
     # always True here and the field stays for the shared outcome shape.
     served_requested_page: bool = True
-    # Kept for the family's shared outcome shape; this repo has no
-    # per-merchant facts to record, because it reads instruments rather than
-    # a marketplace's sellers.
-    shop_facts: Optional[dict] = None
 
     @property
     def ok(self) -> bool:
@@ -271,7 +267,7 @@ def _advertised_next_hrefs(page, page_num: int) -> List[str]:
     This site advertises no page links at all — nine of them on page 1 of a
     150-page query, absolute, spelling `?p=2` through `?p=9` — and it
     publishes **no `<link rel="next">` at all**, on 3 of 3 captures. Only
-    `rel="canonical"`. So §7's most-durable layer simply does not exist on
+    `rel="canonical"`. So the family's most-durable layer simply does not exist on
     this site and the selector reaches for a build artefact because there is
     nothing better to reach for; you cannot order signals by durability when
     the site declines to publish the durable one.
@@ -305,7 +301,7 @@ def _plan_page_urls(page, args, page_one_url: str) -> Optional[List[str]]:
     `--concurrency` split them.
 
     Returning the list up front rather than discovering it is the same
-    property §7 wants from a rebuildable `?page=N`: page 5's address does
+    property the family rule wants from a rebuildable `?page=N`: page 5's address does
     not depend on page 4's content. Here it is stronger, because the
     addresses come from the caller rather than from the site.
     """
@@ -333,10 +329,8 @@ def _same_url(a: str, b: str) -> bool:
     fetching — the exact divergence page_flow.py exists to prevent,
     reproduced inside one engine.
 
-    On this site the comparison has to strip a long tracking tail: a listing
-    anchor arrives with `?extParam=…keyword=kopi&search_id=…&src=search` and
-    a detail page's own canonical arrives with a UTM triple, so two views of
-    one page never match unless both sides are cleaned.
+    Both sides are normalised by `page_flow.comparable` (tracking and locale
+    parameters stripped), so two views of one page compare equal.
     """
     return page_flow.comparable(a) == page_flow.comparable(b)
 
@@ -553,11 +547,9 @@ def _content_when_settled(page, attempts: int = 4, pause_ms: int = 700):
 
     Playwright raises `Page.content: Unable to retrieve content because the
     page is navigating and changing the content` if the document swaps under
-    it. Google Finance does not geo-redirect — `?lang=` is a query parameter and
-    the price is JPY for every visitor — but it DOES redirect on its own in
-    one measured case that this engine will meet routinely: `?p=151` of a
-    150-page query answers 301 to page 1. A snapshot taken right after
-    goto() can land exactly on that swap, so it is retried rather than
+    it. A redirect (a retired `/finance/markets/*` url answering with the
+    market page, or the consent layer) can swap the document right after
+    goto(), so a snapshot that lands on the swap is retried rather than
     raised.
 
     Retries briefly and returns None if the page won't hold still, so the
@@ -580,7 +572,7 @@ def _content_when_settled(page, attempts: int = 4, pause_ms: int = 700):
     return None
 
 
-def handle_captcha_if_present(page, args) -> bool:
+def handle_captcha_if_present(page, args, budget=None) -> bool:
     """Detect and solve a challenge. True if something was solved.
 
     Runs after EVERY navigation, for ANY page — not scoped to one URL. The
@@ -592,7 +584,7 @@ def handle_captcha_if_present(page, args) -> bool:
     honest sentences about it. **This repo implements reCAPTCHA v2/v3;** if
     Google ever renders a challenge, 2Captcha
     solves both and this client would need the matching task type added —
-    that is a TODO here, not a limit of the product (§19).
+    that is a TODO here, not a limit of the product.
 
     What is measured is narrower: no captcha of any kind is configured
     anywhere on google.com/finance. Zero reCAPTCHA, hCaptcha, Turnstile,
@@ -645,6 +637,12 @@ def handle_captcha_if_present(page, args) -> bool:
                        "solved — continuing with whatever the page already "
                        "holds.")
         return False
+    # Spent BEFORE the purchase: a request that fails may still be billed,
+    # and a page gets at most SOLVES_PER_PAGE requests to the solver.
+    if budget is not None and not budget.spend():
+        logger.warning("The per-page solve allowance is spent — not "
+                       "buying another token for this page.")
+        return False
     try:
         token = solve_recaptcha(challenge, args.twocaptcha_key,
                                api_version=args.captcha_api,
@@ -675,7 +673,7 @@ def _parse_for_mode(html: str, url: str, args, page_num: int = 1) -> List:
     and reported 0 rows with exit 4 on a page that parses to 46. Nothing
     raised. `--help` was fine, the module imported, the offline checks were
     green, and only running all three engines against the same url found
-    it — CLAUDE.md §16: mirroring is a design rule, not a verification.
+    it — mirroring is a design rule, not a verification.
 
     `page_num` is threaded through rather than defaulted. On this site it
     indexes the SYMBOL rather than a page, and without it every row of a
@@ -733,7 +731,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     # Counted across the whole block-retry loop, not per attempt: a page that
     # keeps coming back as a challenge would otherwise buy one solve per
     # rotation, which is how a run quietly turns into a bill.
-    solves_bought = 0
+    solve_allowance = page_flow.SolveBudget()
     # A THROTTLE's own budget, kept apart from the block budget because the
     # right response is the opposite one. Google answers a client going too
     # fast with HTTP 503 and its own branded page — and serves the IDENTICAL
@@ -807,11 +805,10 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         # counted only at the second call site, so `SOLVES_PER_PAGE = 1`
         # read like an enforced cap in every repo of this family while one
         # page could buy two solves — measured at three on a site where a
-        # challenge rendered on every fetch (§23). Invisible wherever a
+        # challenge rendered on every fetch. Invisible wherever a
         # challenge is rare, which is everywhere until it is not.
-        if page_flow.solve_budget(solves_bought):
-            if handle_captcha_if_present(session.page, args):
-                solves_bought += 1
+        if solve_allowance.left():
+            if handle_captcha_if_present(session.page, args, solve_allowance):
                 # A solve navigated the page. Give the destination a moment
                 # before judging what came back.
                 session.page.wait_for_timeout(1000)
@@ -846,8 +843,8 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
             # that had painted completely. It only shows up on a page whose
             # own hit count is at or below the floor — a query with fewer
             # than 8 results — which is why it survived in this family: on a
-            # full 45-product page the threshold is 8 and nothing looks
-            # wrong. Found on a live run of a 5-result query.
+            # full page the threshold is far below the count and nothing
+            # looks wrong.
             if found < _min_matches(args, html):
                 logger.info("The grid still had not painted after %.0fs "
                             "(%d match(es)).", wait_timeout / 1000, found)
@@ -866,9 +863,8 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         # cannot name what stopped it is much harder to fix — and bounded by
         # SOLVES_PER_PAGE so a speculative path cannot become a bill.
         if (page_flow.should_solve(state)
-                and page_flow.solve_budget(solves_bought)):
-            solves_bought += 1
-            if handle_captcha_if_present(session.page, args):
+                and solve_allowance.left()):
+            if handle_captcha_if_present(session.page, args, solve_allowance):
                 session.page.wait_for_timeout(1000)
                 html = _content_when_settled(session.page) or html
                 state = _classify(session.page, html, status, args.mode)
@@ -955,38 +951,28 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     outcome.state = state
 
     if state == "blocked":
-        # What a caller needs to know here is that there is nothing to
-        # solve, and that a proxy is probably not the answer either. Akamai
-        # refuses this site with a 43-byte body whose whole content is
-        # `Reference  #18.…` — no widget, nothing for any solver at any
-        # price — and it arrives under **HTTP 200**, so the status code is
-        # not the signal.
-        #
-        # The dump is written even when it is empty, because "43 bytes" is
-        # itself the diagnosis here and a reader who finds no file at all
-        # cannot tell that from a run that never got this far.
+        # A page classified `blocked` carries no challenge to solve (a page
+        # with a reCAPTCHA on it classifies as `challenge` and goes to the
+        # solver instead). A refusal here is Google's own page (a regional
+        # 403, or its interstitial for a badly scored address), and which
+        # one it was decides the remedy — `page_flow.block_advice`, printed at the
+        # end of the run, names it. This message only states what was
+        # observed. The dump is written even when empty: "0 bytes" is itself
+        # a diagnosis, and a reader who finds no file cannot tell that from
+        # a run that never got this far.
         debug_html = f"{args.out}_page{page_num}_debug.html"
         with open(debug_html, "w", encoding="utf-8") as f:
             f.write(html or "")
-        served = served_by_google(html or "")
         logger.error(
             "The site did not serve this request — %d bytes, %s the site's "
-            "own asset host, saved to %s. What clears it on this site is "
-            "usually NOT a different address, and that is measured rather "
-            "than assumed: on 2026-09-21 one datacentre IP was served the "
-            "full 45-product page both by plain curl and by headless "
-            "Chromium, and refused with this same 43-byte deny only when a "
-            "curl handshake claimed a Chrome User-Agent. What Akamai "
-            "refuses here is the CONTRADICTION between a claimed client and "
-            "the TLS fingerprint underneath it. So check for a fingerprint "
-            "you added before buying an exit: no --fingerprint and no "
-            "custom UA over --cdp-endpoint, and no browser UA on an HTTP "
-            "client. If the client is already consistent, --proxy with a "
-            "Japanese exit (or `country-jp` in a Scraping Browser login) is "
-            "the next thing to try. This is exit 3, distinct from a "
+            "own asset host, saved to %s. There is no challenge on this page "
+            "to solve; the advice printed at the "
+            "end of the run says what to check (the client's User-Agent, the "
+            "exit's country, the address). This is exit 3, distinct from a "
             "genuinely empty result (exit 4).%s",
-            len(html or ""), "which references" if served else "with no "
-            "reference to", debug_html,
+            len(html or ""),
+            "which references" if served_by_google(html or "")
+            else "with no reference to", debug_html,
             (f" Tried {block_retries + 1} exit(s)." if has_pool
              else f" Re-fetched {block_retries + 1} time(s)."))
         outcome.blocked_by = "no-response" if not html else "not-served"
@@ -997,7 +983,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     # one place that says which states are worth reading, and an engine
     # comparing against "content" by hand is an engine that can quietly
     # disagree with its twins and with the table — which is the whole
-    # reason page_flow exists (CLAUDE.md §1). Found by checking which
+    # reason page_flow exists. Found by checking which
     # public functions had no consumer: `should_parse` had none, while
     # its three siblings were all wired.
     if state == "not_found":
@@ -1080,7 +1066,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     # so this runs only for a state the policy has already given up on and
     # only REFINES the reason.
     #
-    # The marker set itself is chosen the same way (§18): every candidate
+    # The marker set itself is chosen the same way: every candidate
     # was counted on pages the site plainly served before any of it was
     # trusted. `cf-turnstile` is excluded because the Scraping Browser's own
     # auto-solve extension injects it into every page it loads, and a bare
@@ -1117,7 +1103,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     # with 45 real products, and `/category/{id}/?p=2` answers 200 with page
     # 1 without even redirecting. A run that trusted its own request would
     # re-collect page 1 for as long as it was asked to and report a
-    # complete, entirely duplicate file (§23).
+    # complete, entirely duplicate file.
     if page_flow.pagination_is_addressable(url):
         # Dead here — nothing paginates. It read
         # `args.mode == "listing"`, and "listing" has never been
@@ -1158,19 +1144,13 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         outcome.total_available = total_results(html)
         outcome.header = search_header(html)
         outcome.cap = page_flow.cap_summary(html)
-        # The currency the site stated, carried to the rest of the run.
-        # Google Finance publishes the JSON-LD block that names it on PAGE 1 ONLY
-        # (measured: 1 block on page 1, 0 on pages 2 and 3 of one query), so
-        # without this the first 45 rows carried "JPY" and the next 90
-        # carried null for products whose currency the site had already
-        # stated. Read once, never defaulted: a run that never got page 1
-        # leaves it null.
+        # A page-level currency, stated only when every row on the page
+        # agrees (see product_parser.currency_from_page). Every row already
+        # carries the currency its own record states; this is for the sidecar.
         stated = currency_from_page(html)
         if stated:
             args._currency = stated
-            logger.info("Page 1's structured data states the currency as %s "
-                        "— carrying it to the rest of the run, since Google Finance "
-                        "publishes that block on page 1 only.", stated)
+            logger.info("Every row on page 1 is quoted in %s.", stated)
         else:
             # Not a warning. Every row carries the currency its own record
             # states, so a page-level statement is a convenience rather than
@@ -1205,9 +1185,10 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         if share < floor:
             logger.warning(
                 "Only %.0f%% of page %d carries a price, against a measured "
-                "floor of %d%%. Every one of 405 rows across 11 captured "
-                "pages had one, so this is the read breaking rather than the "
-                "page being unusual — re-run with --dump-html.",
+                "floor of %d%%. Every markets and movers row captured for the "
+                "fixtures had one (46 of 46 on gl=US), so this is the read "
+                "breaking rather than the page being unusual — re-run with "
+                "--dump-html.",
                 share, page_num, floor)
 
         # There is deliberately NO structured-vs-displayed price
@@ -1216,8 +1197,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         # payload carries the price and the rendered tile prints that same
         # number formatted, so `price_source` is "state" on every listing row
         # and a confirmation threshold would describe nothing. Porting a
-        # sibling repo's overlay would be dead code that looks load-bearing
-        # (§4).
+        # sibling repo's overlay would be dead code that looks load-bearing.
         #
         # What IS worth reporting is the share of rows Google Finance publishes a
         # was-price for, because on the listing route the honest answer is
@@ -1367,10 +1347,8 @@ def scrape(args) -> int:
     # result). "single_page_mode" is complete by construction — a detail page
     # has no page 2. Anything else is an early stop, and the run is only a
     # partial view.
-    # Only --mode product is single-page, and "end_of_listing" is complete
-    # too: the site said it served a page other than the one asked for, which
-    # on Google Finance means the query ran out and the site answered with page 1
-    # anyway rather than erroring.
+    # Every mode here reads one page per symbol (or one market page), so a
+    # run that fetched what it planned is "completed".
     stop_reason = "completed"
 
     pool = proxy_pool_from_args(args)
@@ -1542,12 +1520,8 @@ def scrape(args) -> int:
         fresh = dedupe_by_key(oc.products, merged_seen, key=dedupe_key)
         if len(fresh) < len(oc.products):
             # Not necessarily "on an earlier page" — a duplicate can be on
-            # this page. This site's pagination was measured NOT repeating:
-            # 52 rows across two live pages, 52 distinct sku, including two
-            # DIFFERENT Cars of the Week because the site rotates that slot.
-            # But a classifieds listing reorders as sellers bump their ads to
-            # the top, so a small non-zero count here is expected and a large
-            # one is not.
+            # this page: the market page publishes its indices strip twice,
+            # and the same symbol can be passed twice in --symbols.
             logger.info("Page %d: dropped %d duplicate row(s).",
                         oc.page_num, len(oc.products) - len(fresh))
         all_rows.extend(fresh)
@@ -1607,8 +1581,7 @@ def scrape(args) -> int:
 
     # One-per-run context, in the sidecar rather than repeated down a column.
     #
-    # Kept for the family's shared shape. This repo records no per-seller
-    # facts, and no cap arithmetic either: the sidecar carries the shape of
+    # This repo records no cap arithmetic: the sidecar carries the shape of
     # the read instead — which market was asked for, that the url does not
     # paginate, and how many symbols were requested against how many came
     # back.
@@ -1895,37 +1868,15 @@ def parse_args():
                    help="Save the exact HTML the parser is given, on success as "
                         "well as failure. Useful when the row count is right but "
                         "a column comes back empty — see TROUBLESHOOTING.md.")
-    # HEADLESS is the default, and here that is measured in BOTH directions
-    # rather than inherited — §19's rule, because a sibling site answered 0
-    # of 4 headless against 4 of 4 headful and the family default had been
-    # headless simply because headless is what a scraper does.
-    #
-    # Measured 2026-09-21 from one datacentre address, and the answer is
-    # PER-ROUTE, which is the part worth carrying forward:
-    #
-    #   search / item / category   headless 200 (855 KB, payload present)
-    #                              headful  200 (969 KB, payload present)
-    #   ranking.google.com/finance      headless 403, 3 of 3 (one timeout first)
-    #                              headful  200, 3 of 3, 416 KB
-    #
-    # So the routes this scraper reads do not care, and headless is right as
-    # the default. The browser even announces itself on those routes — a
-    # tracking beacon from the headless run carried
-    # `HeadlessChrome;153.0.8010.12` — and Akamai served it anyway.
-    #
-    # But one route on this site does care, and it is the one this repo does
-    # not read. "Does Google Finance block headless browsers?" therefore has no
-    # single answer, which is why the measurement is written as a table
-    # rather than as a sentence.
+    # HEADLESS is the default, measured rather than inherited: on
+    # 2026-09-22, from one datacentre address, headless Chromium was served
+    # the real quote and market pages (as was curl wearing a Chrome
+    # User-Agent). What Google refuses here is a non-browser User-Agent and
+    # some exit COUNTRIES, not a headless browser.
     p.add_argument("--headful", dest="headless", action="store_false",
                    help="Run with a real browser window. Not needed for the "
-                        "routes this scraper reads — quote and market pages "
-                        "pages were all served headless in testing. Worth "
-                        "knowing that ranking.google.com/finance, which this repo "
-                        "does NOT read, answered 403 headless and 200 "
-                        "headful from the same address, so if Google Finance ever "
-                        "extends that to the listing routes this is the "
-                        "flag to reach for.")
+                        "routes this scraper reads: quote and market pages "
+                        "were served headless in testing.")
     p.add_argument("--headless", dest="headless", action="store_true",
                    default=True,
                    help="Run headless. THE DEFAULT. Ignored with "
@@ -1933,6 +1884,10 @@ def parse_args():
     args = p.parse_args()
     # Fill --twocaptcha-key / --cdp-endpoint / --proxy / --url from the
     # environment or .env when the flag was not given. An explicit flag wins.
+    # What the user TYPED, captured before .env fills unset values: after
+    # apply() an environment URL is indistinguishable from a typed one, and
+    # the --symbols/--url conflict below must judge only the typed flag.
+    typed_url = args.url
     env_config.apply(args)
     if args.market:
         args.market = args.market.strip().upper()
@@ -1957,7 +1912,7 @@ def parse_args():
     # Refused above 1, with the reason, rather than honoured as a no-op.
     # Google Finance does not paginate (see page_flow's module docstring),
     # so fetching "three pages" would fetch one page three times and report
-    # a complete three-page run — the silent-success failure §7 is about.
+    # a complete three-page run — the silent-success failure the family rule is about.
     if args.pages and args.pages > 1:
         p.error("%s (got --pages %d)"
                 % (no_pagination_reason(args.url or ""), args.pages))
@@ -1966,7 +1921,7 @@ def parse_args():
     symbols = [s.strip() for s in (args.symbols or "").split(",") if s.strip()]
 
     if args.mode in QUOTE_PAGE_MODES:
-        if symbols and args.url:
+        if symbols and typed_url:
             p.error("pass --symbols or --url, not both: --mode %s reads "
                     "the instruments you name, and two sources for that "
                     "list is a silent way to read the wrong one."

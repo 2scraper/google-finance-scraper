@@ -9,12 +9,11 @@ sign-in, checkout, anything) — this is deliberate, not scoped to any one
 page. If Google Finance renders a reCAPTCHA challenge anywhere — account, sign-in
 and checkout flows are the usual places — this fires.
 
-**NO captcha of any kind is configured anywhere on this site.** Measured
-2026-09-21 across 13 captures, served and refused alike: zero reCAPTCHA,
-hCaptcha, Turnstile, DataDome, PerimeterX, Incapsula, Kasada or AWS WAF
-markers, no challenge iframe, no `data-sitekey`, no `*_SITE_KEY` in any page
-config and no `<captcha-*>` mount point. And what Akamai refuses a request
-with here is a 43-byte page carrying nothing to solve.
+**No captcha was rendered in testing on this site.** Every candidate marker
+scored zero across 11 captures, served and refused alike (2026-09-22). That
+is a measurement from one address, not a claim that Google never challenges:
+it serves its `/sorry/index` interstitial with a reCAPTCHA to addresses it
+scores badly, and that is the page this module exists for.
 
 So this module is a contingency, not part of the happy path — a bot manager
 can be switched on between deploys, and a scraper that cannot name what
