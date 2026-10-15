@@ -333,11 +333,18 @@ jobs:
           # The rich record's own columns, which a list row does not carry.
           equity = next((r for r in quotes
                          if r.get("sku") == "GOOGL:NASDAQ"), {})
-          for col in ("open", "day_high", "day_low", "prev_close", "volume",
+          for col in ("open", "day_high", "day_low", "prev_close",
                       "market_cap", "industry"):
               want("the equity row has no %s" % col,
                    equity.get(col) is not None,
                    "a quote page publishes it; a list row does not")
+          # Volume is NOT a fixed requirement: before the US session opens
+          # Google publishes 0, which the parser nulls as "none" (zero is not
+          # a measurement). A dispatch at 07:00 UTC on 2026-10-15 failed on
+          # exactly that. A time-of-day value cannot be a parser threshold.
+          if equity and equity.get("volume") is None:
+              print("::notice::GOOGL volume is null — the session has not "
+                    "traded yet (Google publishes 0 before the open).")
 
 
           # ---- the movers previews ----------------------------------------
