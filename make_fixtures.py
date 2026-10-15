@@ -112,6 +112,26 @@ SOURCES: Dict[str, Tuple[str, str, str]] = {
                  "https://www.google.com/finance/beta/quote/BMW:ETR"),
     "earnings_us": ("markets_us.html", "earnings",
                     "https://www.google.com/finance/beta/?hl=en&gl=US"),
+    # 2026-10-14: the gl=US calendar started sending each event's figure
+    # record in Google's SPARSE array encoding — a 19-slot list ending in a
+    # {"108": ..} object for an event already reported, and a lone
+    # {"9": .., "11": .., "17": .., "18": ..} object for one not yet
+    # reported — while gl=DE still sent the dense 18-slot form. One capture
+    # of each. The first is the canary's own dump from that day.
+    "earnings_us_sparse": ("markets_us_2026-10-14.html", "earnings",
+                           "https://www.google.com/finance/?hl=en&gl=US"),
+    "earnings_de_dense": ("markets_de_2026-10-15.html", "earnings",
+                          "https://www.google.com/finance/?hl=en&gl=DE"),
+    # A bank's detailed quarters arrive 105 slots wide, not 106 (trailing
+    # empty slots trimmed); the exact-width rule dropped all eight of them.
+    # The movers blob with null lists: gl=US before the open (the canary's
+    # 2026-10-15 12:51 UTC dump) and gl=DE early in its session.
+    "movers_us_premarket": ("markets_us_2026-10-15_premarket.html", "movers",
+                            "https://www.google.com/finance/beta/?gl=US&hl=en"),
+    "movers_de_partial": ("markets_de_2026-10-15.html", "movers",
+                          "https://www.google.com/finance/?hl=en&gl=DE"),
+    "financials_bank": ("quote_bank_us_2026-10-15.html", "financials",
+                        "https://www.google.com/finance/quote/BAC:NYSE"),
 }
 
 # Fixtures that exist to exercise a STATE rather than a row. They keep the
@@ -259,13 +279,20 @@ def build() -> int:
               "take one.", file=sys.stderr)
         return 2
 
+    # Start from what is already generated, so a run with only SOME captures
+    # on disk refreshes those and keeps the rest instead of dropping every
+    # fixture whose capture this machine does not have.
     fixtures: Dict[str, dict] = {}
+    if os.path.exists(OUT_PATH):
+        with open(OUT_PATH, encoding="utf-8") as f:
+            fixtures = dict(json.load(f).get("fixtures", {}))
     failures = 0
 
     for name, (filename, mode, url) in SOURCES.items():
         path = os.path.join(CAPTURES, filename)
         if not os.path.exists(path):
-            print(f"  {name}: SKIP, no {filename}")
+            print(f"  {name}: kept as generated, no {filename} here"
+                  if name in fixtures else f"  {name}: SKIP, no {filename}")
             continue
         html = open(path, encoding="utf-8", errors="replace").read()
         expected = _rows_signature(pp.parse_products(html, url, mode=mode, page=1))
@@ -301,7 +328,8 @@ def build() -> int:
     for name, (filename, mode, url, expected_state) in STATE_SOURCES.items():
         path = os.path.join(CAPTURES, filename)
         if not os.path.exists(path):
-            print(f"  {name}: SKIP, no {filename}")
+            print(f"  {name}: kept as generated, no {filename} here"
+                  if name in fixtures else f"  {name}: SKIP, no {filename}")
             continue
         html = open(path, encoding="utf-8", errors="replace").read()
         full_state = pp.detect_page_state(html, 200, url, mode)

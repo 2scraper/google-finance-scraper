@@ -928,6 +928,89 @@ def test_earnings_values():
     return ok
 
 
+def test_sparse_figure_records():
+    group("earnings and financials in every encoding Google sends")
+    ok = True
+    # 2026-10-14: the gl=US calendar began sending each event's figures in
+    # Google's sparse array encoding (a 19-slot list ending in a {"108": ..}
+    # object, or a lone {"9": .., "11": .., "17": .., "18": ..} object). The
+    # parser matched only the dense 18/106 widths, so every estimate,
+    # currency and period end came back null while the run said `complete`.
+    rows = _rows("earnings_us_sparse")
+    ok &= check("5 events on the 2026-10-14 gl=US capture", len(rows) == 5)
+    by = {r.sku: r for r in rows}
+    asml = by.get("ASML:NASDAQ")
+    ok &= check("a reported event (19-slot list + tail object) keeps its "
+                "estimates", asml is not None
+                and asml.revenue_estimate == 11716143870.0
+                and round(asml.eps_estimate or 0, 2) == 10.76)
+    ok &= check("... and its currency and period end",
+                asml is not None and asml.currency == "EUR"
+                and asml.period_end == "2026-09-30"
+                and (asml.fiscal_year, asml.fiscal_quarter) == (2026, 3))
+    tsm = by.get("TSM:NYSE")
+    ok &= check("an unreported event (a lone sparse object) keeps its "
+                "estimates", tsm is not None
+                and tsm.revenue_estimate == 1460392943930.0
+                and round(tsm.eps_estimate or 0, 2) == 4.52)
+    ok &= check("... and its currency is read, not defaulted",
+                tsm is not None and tsm.currency == "TWD"
+                and tsm.period_end == "2026-09-30")
+    ok &= check("every event carries both estimates, a currency and a "
+                "period end",
+                all(r.revenue_estimate and r.eps_estimate and r.currency
+                    and r.period_end for r in rows))
+    # The dense form is still served elsewhere (gl=DE, 2026-10-15), so both
+    # have to keep working.
+    de = {r.sku: r for r in _rows("earnings_de_dense")}
+    sap = de.get("SAP:ETR")
+    ok &= check("the dense 18-slot form still reads (SAP:ETR)",
+                sap is not None and sap.revenue_estimate == 10094598350.0
+                and round(sap.eps_estimate or 0, 2) == 1.83
+                and sap.currency == "EUR")
+    # A bank's detailed quarters are 105 slots, not 106. Values checked
+    # against the page's own rendered table (Jun 2026: revenue 30.19B,
+    # operating expense 18.63B; Mar 2026: 28.94B, 18.53B).
+    fin = _rows("financials_bank")
+    ok &= check("BAC: the eight detailed quarters are read",
+                sum(1 for r in fin if r.detailed) == 8)
+    q = fin[0] if fin else None
+    ok &= check("BAC 2026 Q2 matches the rendered table",
+                q is not None and (q.fiscal_year, q.fiscal_quarter) == (2026, 2)
+                and q.revenue == 30192000000.0
+                and q.operating_expense == 18627000000.0
+                and q.eps == 1.21 and q.currency == "USD")
+    q1 = fin[1] if len(fin) > 1 else None
+    ok &= check("BAC 2026 Q1 matches the rendered table",
+                q1 is not None and q1.revenue == 28935000000.0
+                and q1.operating_expense == 18531000000.0)
+    # The movers blob with NULL lists. Before the US open (2026-10-15 12:51
+    # UTC) it was [null, null, [4 most-active]]; gl=DE early in its session
+    # was [null, [4 losers], [4 most-active]]. Requiring three populated
+    # lists returned 0 movers (exit 4) on both.
+    pre = _rows("movers_us_premarket")
+    ok &= check("movers before the open: the 4 rows that ARE published",
+                len(pre) == 4)
+    ok &= check("... labelled positionally, since no gainers/losers list "
+                "exists to verify the labels against",
+                {r.listing for r in pre} == {"movers_2"})
+    part = _rows("movers_de_partial")
+    ok &= check("movers with no gainers yet: 4 losers + 4 most-active",
+                len(part) == 8
+                and sum(1 for r in part if r.listing == "losers") == 4
+                and sum(1 for r in part if r.listing == "most_active") == 4)
+    ok &= check("... and every loser is down",
+                all(r.change_pct < 0 for r in part if r.listing == "losers"))
+    # The decoder itself, on the three shapes and on what it must refuse.
+    ok &= check("sparse decoding puts field N at slot N-1",
+                pp._jspb_dense([1, {"3": "c"}]) == [1, None, "c"]
+                and pp._jspb_dense({"2": 5}) == [None, 5])
+    ok &= check("an object keyed by anything but field numbers is not "
+                "this encoding", pp._jspb_dense({"a": 1}) is None
+                and pp._fin_figures([{"x": 1}]) is None)
+    return ok
+
+
 def test_chart_values():
     group("chart: two intervals, and the bar that was mislabelled")
     ok = True
@@ -2511,6 +2594,7 @@ def main() -> int:
     ok &= test_financial_values()
     ok &= test_analyst_values()
     ok &= test_earnings_values()
+    ok &= test_sparse_figure_records()
     ok &= test_chart_values()
     ok &= test_instrument_selection_is_deterministic()
     ok &= test_every_mode_is_order_independent()
