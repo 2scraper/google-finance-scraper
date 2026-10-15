@@ -10,6 +10,8 @@ release notes lead with it.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-15
+
 > **Behaviour changes in this release:**
 >
 > - Output files are now written atomically (a temp file in the same
@@ -73,7 +75,6 @@ release notes lead with it.
   `page_flow.attempts` in every entry point; a check reads the source of each
   one and calls the validator, so a new engine declaring the flag with a
   plain int fails the suite.
-
 - **Scraper API: `waitFor` is now sent as a JSON object.** Measured
   2026-09-23 against `scraper.2captcha.com/tasks/sync`: the JSON-encoded
   string this client sent (the form older docs described) is refused with
@@ -243,6 +244,7 @@ first:
   address. `unsupported_client` is therefore its own state and never counts
   as blocked.
 
-[Unreleased]: https://github.com/2scraper/google-finance-scraper/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/2scraper/google-finance-scraper/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/2scraper/google-finance-scraper/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/2scraper/google-finance-scraper/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/2scraper/google-finance-scraper/releases/tag/v0.1.0
