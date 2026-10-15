@@ -39,6 +39,24 @@ release notes lead with it.
   this client. `http_code` (an int) is read now, with `status` kept as a
   fallback only when it is an int.
 
+### Fixed — Google Finance changed its payload
+
+- **`--mode earnings` returned every event with `revenue_estimate`,
+  `eps_estimate`, `currency` and `period_end` null since 2026-10-09**, while
+  the run reported `complete` (the canary caught it). The gl=US calendar now
+  sends each event's figures in Google's sparse array encoding — a 19-slot
+  list ending in a `{"108": ..}` object for an event already reported, or a
+  lone `{"9": .., "11": .., "17": .., "18": ..}` object for one not yet
+  reported — and the parser accepted only the dense 18/106-slot widths. It
+  now expands the sparse form (field N is slot N-1, so the existing slot map
+  applies unchanged) and recognises a figure record by its currency and
+  period-end slots rather than by its exact width. gl=DE still sends the
+  dense form; both are pinned by fixtures cut from 2026-10-14/15 pages.
+- **`--mode financials` dropped every detailed quarter of a bank.** BAC:NYSE
+  publishes its detailed quarters 105 slots wide, not 106, so its newest row
+  was 2024 Q2. They are read now (8 detailed quarters); the 2026 Q2 and Q1
+  revenue and operating expense match the page's own rendered table.
+
 ## [0.2.0] — 2026-09-22
 
 Four more modes, all reading the SAME first response the quote modes already

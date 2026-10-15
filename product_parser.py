@@ -869,12 +869,73 @@ _FIN_ESTIMATE_SLOTS = {"revenue_estimate": 8, "eps_estimate": 10}
 _FIN_CURRENCY_SLOT = 16
 _FIN_PERIOD_END_SLOT = 17
 
-# The two array widths the site publishes. The 18-slot form is a strict
-# PREFIX of the 106-slot one — verified on Alphabet's 2024 Q2, where slot 0
-# is revenue, 9 is EPS and 16/17 are the currency and period end, exactly as
-# in a detailed quarter — so one slot map serves both and the narrow rows
-# simply have fewer columns filled.
+# The two array widths the site published when the slot map was made. The
+# 18-slot form is a strict PREFIX of the 106-slot one — verified on
+# Alphabet's 2024 Q2, where slot 0 is revenue, 9 is EPS and 16/17 are the
+# currency and period end, exactly as in a detailed quarter — so one slot
+# map serves both and the narrow rows simply have fewer columns filled.
 _FIN_WIDTHS = (18, 106)
+
+# A period carries every slot the map reads (operating expense is the last,
+# at 38) only in its detailed form. Keyed on that rather than on the exact
+# width 106: a bank's detailed quarter arrives 105 wide (trailing empty slots
+# trimmed; BAC:NYSE, 2026-10-14), and requiring 106 dropped all eight of its
+# detailed quarters without a word.
+_FIN_DETAILED_MIN = max(_FIN_SLOTS.values()) + 1
+
+
+def _jspb_dense(v: Any) -> Optional[list]:
+    """Expand Google's sparse array encoding into a plain positional list.
+
+    The payload is protobuf-as-JSON-array: position i holds field i+1, and
+    when the high fields are far apart the tail is written as ONE trailing
+    object keyed by the 1-based field number. Seen on 2026-10-14 in the
+    earnings calendar, where the same figure record arrived three ways:
+
+        dense      [.., rev_est(8), eps(9), eps_est(10), .., "EUR", [y,m,d]]
+        mixed      [... 18 slots ..., {"108": x, "109": y}]       (19 long)
+        all-sparse [{"9": rev_est, "11": eps_est, "17": "TWD",
+                     "18": [2026, 9, 30], "109": y}]
+
+    `"9"` is field 9, slot 8 — the revenue estimate in the dense form — and
+    `"17"`/`"18"` land on slots 16/17, the currency and the period end, so
+    one slot map reads all three. A dict whose keys are not all field
+    numbers is not this encoding and yields None.
+    """
+    if isinstance(v, dict):
+        base, ext = [], v
+    elif isinstance(v, list) and v and isinstance(v[-1], dict):
+        base, ext = list(v[:-1]), v[-1]
+    elif isinstance(v, list):
+        return v
+    else:
+        return None
+    if not ext or not all(isinstance(k, str) and k.isdigit() and int(k) >= 1
+                          for k in ext):
+        return None
+    out = base + [None] * max(0, max(int(k) for k in ext) - len(base))
+    for k, x in ext.items():
+        out[int(k) - 1] = x
+    return out
+
+
+def _fin_figures(v: Any) -> Optional[list]:
+    """A period's figure array in any of its encodings, or None.
+
+    Recognised by structure rather than by width: either one of the two
+    widths the slot map was verified on, or an array whose currency slot
+    holds a string and whose period-end slot holds a date — the two fields
+    every form of the record carries.
+    """
+    if isinstance(v, list) and len(v) in _FIN_WIDTHS \
+            and not (v and isinstance(v[-1], dict)):
+        return v
+    arr = _jspb_dense(v)
+    if (arr is None or len(arr) <= _FIN_PERIOD_END_SLOT
+            or not isinstance(arr[_FIN_CURRENCY_SLOT], str)
+            or not _iso_date(arr[_FIN_PERIOD_END_SLOT])):
+        return None
+    return arr
 
 
 def _iso_date(v: Any) -> Optional[str]:
@@ -900,11 +961,13 @@ def _period_nodes(data: Dict[str, Any]) -> List[list]:
     for node in _walk(list(data.values())):
         if (len(node) >= 3 and isinstance(node[0], int)
                 and 1990 < node[0] < 2200
-                and isinstance(node[1], int) and 1 <= node[1] <= 4
-                and isinstance(node[2], list) and len(node[2]) in _FIN_WIDTHS):
+                and isinstance(node[1], int) and 1 <= node[1] <= 4):
+            figures = _fin_figures(node[2])
+            if figures is None:
+                continue
             key = (node[0], node[1])
-            if key not in best or len(node[2]) > len(best[key][2]):
-                best[key] = node
+            if key not in best or len(figures) > len(best[key][2]):
+                best[key] = [node[0], node[1], figures]
     return [best[k] for k in sorted(best, reverse=True)]
 
 
@@ -947,7 +1010,7 @@ def parse_financials(html: Optional[str], url: str = "", *,
             currency=(figures[_FIN_CURRENCY_SLOT]
                       if _FIN_CURRENCY_SLOT < len(figures)
                       and isinstance(figures[_FIN_CURRENCY_SLOT], str) else None),
-            detailed=len(figures) == max(_FIN_WIDTHS),
+            detailed=len(figures) >= _FIN_DETAILED_MIN,
             page=page,
             position=pos,
         )
@@ -1125,8 +1188,12 @@ def parse_earnings(html: Optional[str], url: str = "", *,
     for pos, node in enumerate(_earnings_nodes(payload(html)), 1):
         ticker, exchange = node[0]
         detail = node[3] if len(node) > 3 and isinstance(node[3], list) else []
-        figures = next((x for x in detail
-                        if isinstance(x, list) and len(x) in _FIN_WIDTHS), [])
+        # The figure record, in whichever encoding it arrived (see
+        # `_jspb_dense`). Matching only the dense widths silently nulled the
+        # estimates, currency and period end on every gl=US event from
+        # 2026-10-09 while the run still reported `complete`.
+        figures = next((f for f in map(_fin_figures, detail)
+                        if f is not None), [])
 
         def slot(i):
             v = figures[i] if i < len(figures) else None
