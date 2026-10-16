@@ -2349,14 +2349,14 @@ def test_canary_is_coherent():
     wf = open(path, encoding="utf-8").read()
 
     # It must need no secrets. This repo's central claim is that the site
-    # needs none, and a canary gated on one would go green every day while
+    # needs none, and a canary gated on one would go green on every run while
     # testing nothing — the other half of the canary rule.
     ok &= check("the canary is not gated on a secret",
                 "secrets." not in wf)
     ok &= check("it runs on a schedule, not only on dispatch",
                 "schedule:" in wf and "cron:" in wf)
 
-    # Every mode must be under daily test, or a mode can rot unnoticed —
+    # Every mode must be under scheduled test, or a mode can rot unnoticed —
     # and this must look at the COMMANDS, not at the file.
     #
     # The first version grepped the whole YAML for "--mode <name>" and
@@ -2415,7 +2415,7 @@ def test_canary_is_coherent():
             parsed = False
         ok &= check("the assertion block parses as Python", parsed)
         ok &= check("it asserts on the financial slot map, which nothing "
-                    "else tests daily",
+                    "else tests on a schedule",
                     "net_profit_margin" in body and "ebitda" in body)
         ok &= check("it asserts both chart intervals are present",
                     '"5m", "1d"' in body or "{'5m', '1d'}" in body)

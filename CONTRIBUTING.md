@@ -96,12 +96,12 @@ Then the rest of the presentation, in the order that matters:
 
 1. `python3 smoke_test.py` green, and the canary dispatched at least once by
    hand before anyone trusts the badge. This canary needs **no secret** and
-   runs daily on a schedule, which is deliberate: the README's central claim
+   runs weekly (Mondays) on a schedule, which is deliberate: the README's central claim
    is that you need no key, no proxy and no account to read this site, and a
    scheduled, ungated, real run of every mode is that claim under test every
-   morning. The family's rule that a canary which cannot
+   Monday. The family's rule that a canary which cannot
    pass must SKIP has a second half — a canary that CAN pass without a
-   credential must never be gated on one, or the badge goes green every day
+   credential must never be gated on one, or the badge goes green on every run
    while testing nothing.
 
    Note that `workflow_dispatch` needs the workflow to exist on the DEFAULT
