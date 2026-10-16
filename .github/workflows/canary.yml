@@ -8,12 +8,12 @@ name: canary
 #
 # THIS CANARY NEEDS NO SECRETS, AND THAT IS THE POINT
 # ---------------------------------------------------
-# It runs real scrapes from a bare GitHub runner, daily, and it is EXPECTED
+# It runs real scrapes from a bare GitHub runner, weekly (Mondays), and it is EXPECTED
 # TO BE GREEN. That is not a convenience — it is what keeps this repo's
 # central claim honest. The README says you need no key, no proxy and no
 # account to read this site; this workflow is that claim, under test, every
-# morning. If Google ever puts it behind something, the badge goes red the
-# next day and the claim is retested without anyone having to remember to.
+# Monday. If Google ever puts it behind something, the badge goes red on the
+# next weekly run and the claim is retested without anyone having to remember to.
 #
 # Measured 2026-09-22 from one datacentre address, no credentials of any
 # kind: `--mode markets --market US` returned 46 rows with every one priced,
@@ -45,7 +45,7 @@ on:
   schedule:
     # Mid-morning New York, so the US market page is awake and its movers
     # lists are populated rather than showing an overnight blank.
-    - cron: "41 14 * * *"
+    - cron: "41 14 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -140,7 +140,7 @@ jobs:
         id: deep
         # The four instrument modes read the SAME first response the quote
         # mode fetches, so this is three page loads rather than three
-        # scrapes of three different things — and it is the only daily test
+        # scrapes of three different things — and it is the only scheduled test
         # that the payload's unlabelled financial slots still hold what
         # they held when they were mapped. If Google reorders that array,
         # nothing raises and nothing looks wrong; the assertions below are

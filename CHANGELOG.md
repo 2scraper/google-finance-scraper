@@ -10,6 +10,10 @@ release notes lead with it.
 
 ## [Unreleased]
 
+### Changed
+
+- CI only: the canary now runs weekly (Mondays 14:41 UTC) instead of daily, and on a manual dispatch.
+
 ## [0.3.0] — 2026-10-15
 
 > **Behaviour changes in this release:**
