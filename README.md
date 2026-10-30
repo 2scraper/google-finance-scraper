@@ -1,4 +1,4 @@
-# google-finance-scraper
+# Google Finance Scraper — Quotes, Financials and Analyst Targets in Python
 
 [![tests](https://github.com/2scraper/google-finance-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/google-finance-scraper/actions/workflows/tests.yml)
 [![canary](https://github.com/2scraper/google-finance-scraper/actions/workflows/canary.yml/badge.svg)](https://github.com/2scraper/google-finance-scraper/actions/workflows/canary.yml)
@@ -6,6 +6,8 @@
 [![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
 [![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20Puppeteer-informational)](#engines)
 [![runs without an account](https://img.shields.io/badge/runs-without%20an%20account-success)](#what-you-actually-need)
+
+**Google Finance scraper** — an open-source (MIT) Python tool that reads Google Finance's server-rendered pages and writes instrument quotes, quarterly financials, analyst ratings and price targets, OHLCV bars, market strips, the day's gainers and losers and the earnings calendar to JSON or CSV. Measured on 2026-09-22 from one datacentre address with no credential of any kind, every mode returned rows; from a region Google does not serve Finance in (a Russian exit was refused with HTTP 403) you need a `--proxy` or a Scraping Browser API exit in a supported region. Use it to build a quotes or financials dataset, or compare two runs of the same mode with the included diff tool.
 
 Scrapes **Google Finance** — instrument quotes, quarterly financials, analyst
 ratings and price targets, OHLCV bars, the market index and sector strips,
@@ -372,6 +374,23 @@ to the capture it came from — column for column — before writing it.
 
 `captures/` is deliberately not in the repository: eleven captures of this
 site are 13 MB.
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [OpenSea scraper](https://github.com/2scraper/opensea-scraper) — NFT items, collection rankings and activity feeds…
+- [Polymarket scraper](https://github.com/2scraper/polymarket-scraper) — Prediction-market prices, order books, volumes and on-chain…
+- [Screener.in scraper](https://github.com/2scraper/screener-scraper) — Any screener.in stock screen or sector listing
+- [TipRanks scraper](https://github.com/2scraper/tipranks-scraper) — Smart Score, analyst consensus and price targets for any…
+- [Binance scraper](https://github.com/2scraper/binance-scraper) — P2P adverts, copy-trading portfolios and announcements…
+- [Google Play scraper](https://github.com/2scraper/googleplay-scraper) — Apps, installs, rating histograms and unbounded reviews…
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
 
 ## Licence
 
